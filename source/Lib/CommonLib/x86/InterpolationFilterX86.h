@@ -114,7 +114,11 @@ static void fullPelCopySSE( const ClpRng& clpRng, const void*_src, int srcStride
 
         if( isFirst == isLast )
         {
+#if ENABLE_SPATIAL_SCALABLE
+          vsum =  vsrc;
+#else
           vsum =  _mm_min_epi16( vibdimax, _mm_max_epi16( vibdimin, vsrc ) );
+#endif
         }
         else if( isFirst )
         {
@@ -174,7 +178,11 @@ static void fullPelCopySSE_M4( const ClpRng& clpRng, const void*_src, ptrdiff_t 
 
       if( isFirst == isLast )
       {
+#if ENABLE_SPATIAL_SCALABLE
+        vsum = vsrc;
+#else
        vsum = _mm_min_epi16( vibdimax, _mm_max_epi16( vibdimin, vsrc ) );
+#endif
       }
       else if( isFirst )
       {
@@ -234,7 +242,11 @@ static void fullPelCopyAVX2( const ClpRng& clpRng, const void*_src, int srcStrid
 
         if( isFirst == isLast )
         {
+#if ENABLE_SPATIAL_SCALABLE
+          vsum = vsrc;
+#else
           vsum = _mm256_min_epi16( vibdimax, _mm256_max_epi16( vibdimin, vsrc ) );
+#endif
         }
         else if( isFirst )
         {

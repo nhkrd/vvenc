@@ -107,7 +107,11 @@ struct ReferencePictureList
   ReferencePictureList();
 
   void     setRefPicIdentifier  ( int idx, int identifier, bool isLongterm, bool isInterLayerRefPic, int interLayerIdx );
+#if ENABLE_SPATIAL_SCALABLE
+  int      getNumRefEntries()  const { return numberOfShorttermPictures + numberOfLongtermPictures + numberOfInterLayerPictures; }
+#else
   int      getNumRefEntries     ()  const { return numberOfShorttermPictures + numberOfLongtermPictures; }
+#endif
   bool     isPOCInRefPicList    ( const int poc, const int currPoc ) const;
 };
 
@@ -198,8 +202,13 @@ struct ConstraintInfo
     , oneSlicePerSubpicConstraintFlag                 ( false )
     , noSubpicInfoConstraintFlag                      ( false )
     , intraOnlyConstraintFlag                         ( false )
+#if ENABLE_SPATIAL_SCALABLE
+    , maxBitDepthConstraintIdc                        ( 16    )
+    , maxChromaFormatConstraintIdc                    ( CHROMA_444 )
+#else
     , maxBitDepthConstraintIdc                        ( false )
     , maxChromaFormatConstraintIdc                    ( CHROMA_420 )
+#endif
     , onePictureOnlyConstraintFlag                    ( false )
     , lowerBitRateConstraintFlag                      ( false )
     , allLayersIndependentConstraintFlag              ( false )
@@ -218,7 +227,11 @@ struct ConstraintInfo
     , noMttConstraintFlag                             ( false )
     , noChromaQpOffsetConstraintFlag                  ( false )
     , noQtbttDualTreeIntraConstraintFlag              ( false )
+#if ENABLE_SPATIAL_SCALABLE
+    , maxLog2CtuSizeConstraintIdc                     ( 8 )
+#else
     , maxLog2CtuSizeConstraintIdc                     ( 0 )
+#endif
     , noPartitionConstraintsOverrideConstraintFlag    ( false )
     , noSaoConstraintFlag                             ( false )
     , noAlfConstraintFlag                             ( false )
@@ -516,10 +529,19 @@ struct VPS
   std::vector<int>              numLayersInOls;
   std::vector<std::vector<int>> layerIdInOls;
 
+#if ENABLE_SPATIAL_SCALABLE
+  std::vector<int> multiLayerOlsIdxToOlsIdx; // mapping from multi-layer OLS index to OLS index. Initialized in deriveOutputLayerSets()
+                                             // m_multiLayerOlsIdxToOlsIdx[n] is the OLSidx of the n-th multi-layer OLS.
+#endif
+
   VPS()
   : vpsId                       ( 0 )
   , maxLayers                   ( 0 )
+#if ENABLE_SPATIAL_SCALABLE
+  , maxSubLayers                ( 7 )
+#else
   , maxSubLayers                ( 0 )
+#endif
   , defaultPtlDpbHrdMaxTidFlag  ( false )
   , allLayersSameNumSubLayers   ( false )
   , allIndependentLayers        ( false )
@@ -528,7 +550,15 @@ struct VPS
   , numOutputLayerSets          ( 0 )
   , numPtls                     ( 0 )
   , extension                   ( false )
+#if ENABLE_SPATIAL_SCALABLE
+  , generalHrdParamsPresent     ( false )
+  , sublayerCpbParamsPresent    ( false )
+  , numOlsHrdParamsMinus1       ( 0 )
+  , totalNumOLSs                ( 1 )
+  , numMultiLayeredOlss         ( 0 )
+#else
   , totalNumOLSs                ( 0 )
+#endif
   , numDpbParams                ( 0 )
   , sublayerDpbParamsPresent    ( false)
   , targetOlsIdx                ( 0 )
@@ -544,8 +574,50 @@ struct VPS
     memset( ptlMaxTemporalId,   0, sizeof(ptlMaxTemporalId));
     memset( olsPtlIdx,          0, sizeof(olsPtlIdx));
     memset( interLayerRefIdx,   0, sizeof(interLayerRefIdx));
+#if ENABLE_SPATIAL_SCALABLE
+    for (int i = 0; i < MAX_VPS_SUBLAYERS; i++)
+    {
+      vpsCfgPredDirection[i] = 0;
+    }
+    for (int i = 0; i < MAX_VPS_LAYERS; i++)
+    {
+      layerId[i] = 0;
+      independentLayer[i] = true;
+      generalLayerIdx[i] = 0;
+      for (int j = 0; j < MAX_VPS_LAYERS; j++)
+      {
+        directRefLayer[i][j] = 0;
+        directRefLayerIdx[i][j] = MAX_VPS_LAYERS;
+        interLayerRefIdx[i][i] = NOT_VALID;
+      }
+    }
+    for (int i = 0; i < MAX_NUM_OLSS; i++)
+    {
+      for (int j = 0; j < MAX_VPS_LAYERS; j++)
+      {
+        olsOutputLayer[i][j] = 0;
+      }
+      if (i == 0)
+      {
+        ptPresent[i] = 1;
+      }
+      else
+      {
+        ptPresent[i] = 0;
+      }
+      ptlMaxTemporalId[i] = maxSubLayers - 1;
+      olsPtlIdx[i] = 0;
+      hrdMaxTid[i] = maxSubLayers - 1;
+      olsHrdIdx[i] = 0;
+    }
+#endif
   }
   void deriveOutputLayerSets();
+#if ENABLE_SPATIAL_SCALABLE
+  void              deriveTargetOutputLayerSet(int targetOlsIdx);
+  void              checkVPS();
+#endif
+
   int               getMaxDecPicBuffering( int temporalId ) const        { return dpbParameters[olsDpbParamsIdx[targetOlsIdx]].maxDecPicBuffering[temporalId]; }
   int               getNumReorderPics( int temporalId ) const            { return dpbParameters[olsDpbParamsIdx[targetOlsIdx]].numReorderPics[temporalId]; }
 
@@ -1252,6 +1324,12 @@ class Slice
   bool                        isUsedAsLongTerm[NUM_REF_PIC_LIST_01][MAX_NUM_REF+1];
   int                         depth;
 
+#if ENABLE_SPATIAL_SCALABLE
+  Picture*                    scaledRefPicList[NUM_REF_PIC_LIST_01][MAX_NUM_REF + 1];
+  Picture*                    savedRefPicList[NUM_REF_PIC_LIST_01][MAX_NUM_REF + 1];
+  std::pair<int, int>         scalingRatio[NUM_REF_PIC_LIST_01][VVENC_MAX_NUM_REF_PICS];
+#endif
+
 
   // access channel
   const VPS*                  vps;
@@ -1329,7 +1407,17 @@ public:
   bool                        isTemporalLayerSwitchingPoint( PicList& rcListPic )                                           const;
   bool                        isStepwiseTemporalLayerSwitchingPointCandidate( const PicList& rcListPic )                          const;
   int                         checkThatAllRefPicsAreAvailable(const PicList& rcListPic, const ReferencePictureList* pRPL, int rplIdx, int &rCurPoc)                const;
+#if ENABLE_SPATIAL_SCALABLE
+  void                        createExplicitReferencePictureSetFromReference(const PicList& rcListPic, const ReferencePictureList* pRPL0, const ReferencePictureList* pRPL1, const VVEncCfg& encCfg);
+#else
   void                        createExplicitReferencePictureSetFromReference(const PicList& rcListPic, const ReferencePictureList* pRPL0, const ReferencePictureList* pRPL1);
+#endif
+#if ENABLE_SPATIAL_SCALABLE
+  bool                        xCheckMaxTidILRefPics(int layerIdx, Picture* refPic, bool currentPicIsIRAP);
+  void                        scaleRefPicList(Picture* scaledRefPic[], PicHeader* picHeader, APS** apss, APS* lmcsAps, APS* scalingListAps, const bool isDecoder);
+  void                        freeScaledRefPicList(Picture* scaledRefPic[]);
+  const std::pair<int, int>&  getScalingRatio(const RefPicList refPicList, const int refIdx)  const { CHECK(refIdx < 0, "Invalid reference index"); return scalingRatio[refPicList][refIdx]; }
+#endif
   void                        getWpScaling( RefPicList e, int iRefIdx, WPScalingParam *&wp) const;
 
   void                        resetWpScaling();

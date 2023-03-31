@@ -300,7 +300,11 @@ bool InterPrediction::xCheckIdenticalMotion( const CodingUnit& cu ) const
       {
         if( !cu.affine )
         {
+#if ENABLE_SPATIAL_SCALABLE
+          if (cu.mv[0][0] == cu.mv[1][0])
+#else
           if( cu.mv[0] == cu.mv[1] )
+#endif
           {
             return true;
           }
@@ -375,7 +379,12 @@ void InterPrediction::xPredInterUni(const CodingUnit& cu, const RefPicList& refP
   else
   {
     mv[0] = cu.mv[refPicList][0];
+#if ENABLE_SPATIAL_SCALABLE
+    if (!isIBC && cu.slice->getRefPic(refPicList, iRefIdx)->isRefScaled(cu.cs->pps) == false)
+      if (!cu.cs->pps->wrapAroundEnabled)
+#else
     if (!isIBC )
+#endif
       clipMv(mv[0], cu.lumaPos(), cu.lumaSize(), *cu.cs->pcv);
   }
 
@@ -390,7 +399,11 @@ void InterPrediction::xPredInterUni(const CodingUnit& cu, const RefPicList& refP
       continue;
     if (cu.affine)
     {
+#if ENABLE_SPATIAL_SCALABLE
+      xPredAffineBlk(compID, cu, cu.slice->getRefPic(refPicList, iRefIdx)->unscaledPic, mv, pcYuvPred, bi, cu.slice->clpRngs[compID], refPicList, cu.slice->getScalingRatio(refPicList, iRefIdx));
+#else
       xPredAffineBlk(compID, cu, cu.slice->getRefPic(refPicList, iRefIdx), mv, pcYuvPred, bi, cu.slice->clpRngs[compID], refPicList);
+#endif
     }
     else
     {
@@ -400,7 +413,11 @@ void InterPrediction::xPredInterUni(const CodingUnit& cu, const RefPicList& refP
       }
       else
       {
+#if ENABLE_SPATIAL_SCALABLE
+        xPredInterBlk(compID, cu, cu.slice->getRefPic(refPicList, iRefIdx)->unscaledPic, mv[0], pcYuvPred, bi, cu.slice->clpRngs[compID], bdofApplied, isIBC, refPicList, 0, 0, false, NULL, 0, cu.slice->getScalingRatio(refPicList, iRefIdx));
+#else
         xPredInterBlk(compID, cu, cu.slice->getRefPic(refPicList, iRefIdx), mv[0], pcYuvPred, bi, cu.slice->clpRngs[compID], bdofApplied, isIBC, refPicList);
+#endif
       }
     }
   }
@@ -496,6 +513,14 @@ bool InterPrediction::motionCompensation( CodingUnit& cu, PelUnitBuf& predBuf, c
 
     bool dmvrApplied = false;
     dmvrApplied = (cu.mvRefine) && CU::checkDMVRCondition(cu);
+#if ENABLE_SPATIAL_SCALABLE
+    int refIdx0 = cu.refIdx[REF_PIC_LIST_0];
+    int refIdx1 = cu.refIdx[REF_PIC_LIST_1];
+    bool refIsScaled = (refIdx0 < 0 ? false : cu.slice->getRefPic(REF_PIC_LIST_0, refIdx0)->isRefScaled(cu.cs->pps)) ||
+                       (refIdx1 < 0 ? false : cu.slice->getRefPic(REF_PIC_LIST_1, refIdx1)->isRefScaled(cu.cs->pps));
+    dmvrApplied = dmvrApplied && !refIsScaled;
+    bdofApplied = bdofApplied && !refIsScaled;
+#endif
     if ((cu.lumaSize().width > MAX_BDOF_APPLICATION_REGION || cu.lumaSize().height > MAX_BDOF_APPLICATION_REGION) && cu.mergeType != MRG_TYPE_SUBPU_ATMVP && (bdofApplied && !dmvrApplied))
     {
       xSubPuBDOF( cu, predBuf, refPicList );
@@ -565,7 +590,11 @@ void InterPrediction::xSubPuMC(CodingUnit& cu, PelUnitBuf& predBuf, const RefPic
 
   cu.refIdx[0] = 0;
   cu.refIdx[1] = cu.cs->slice->sliceType == VVENC_B_SLICE ? 0 : -1;
+#if ENABLE_SPATIAL_SCALABLE
+  bool scaled = cu.cs->slice->getRefPic(REF_PIC_LIST_0, 0)->isRefScaled(cu.cs->pps) || (cu.cs->slice->sliceType == VVENC_B_SLICE ? cu.cs->slice->getRefPic(REF_PIC_LIST_1, 0)->isRefScaled(cu.cs->pps) : false);
+#else
   bool scaled = false;//!CU::isRefPicSameSize(cu);
+#endif
 
   m_subPuMC = true;
 
@@ -716,6 +745,9 @@ void InterPredInterpolation::xPredInterBlk ( const ComponentID compID, const Cod
                                            , const bool bilinearMC
                                            , const Pel* srcPadBuf
                                            , const int32_t srcPadStride
+#if ENABLE_SPATIAL_SCALABLE
+                                           , const std::pair<int, int> scalingRatio
+#endif
                                           )
 {
   const ChromaFormat  chFmt = cu.chromaFormat;
@@ -730,6 +762,17 @@ void InterPredInterpolation::xPredInterBlk ( const ComponentID compID, const Cod
   {
     wrapRef = wrapClipMv( mv, cu.blocks[0].pos(), cu.blocks[0].size(), *cu.cs);
   }
+#if ENABLE_SPATIAL_SCALABLE
+  bool useAltHpelIf = cu.imv == IMV_HPEL;
+
+  if (!isIBC && xPredInterBlkRPR(scalingRatio, *cu.cs->pps, CompArea(compID, chFmt, cu.blocks[compID], Size(dstPic.bufs[compID].width, dstPic.bufs[compID].height)), refPic, mv, dstPic.bufs[compID].buf, dstPic.bufs[compID].stride, bi, wrapRef, clpRng, 0, useAltHpelIf))
+  {
+    CHECK(bilinearMC, "DMVR should be disabled with RPR");
+    CHECK(bdofApplied, "BDOF should be disabled with RPR");
+  }
+  else
+  {
+#endif
   int xFrac = mv.hor & ((1 << shiftHor) - 1);
   int yFrac = mv.ver & ((1 << shiftVer) - 1);
   if (isIBC)
@@ -856,6 +899,9 @@ void InterPredInterpolation::xPredInterBlk ( const ComponentID compID, const Cod
     dstBuf.buf    = backupDstBufPtr;
     dstBuf.stride = backupDstBufStride;
   }
+#if ENABLE_SPATIAL_SCALABLE
+  }
+#endif
 }
 
 int InterPredInterpolation::xRightShiftMSB( int numer, int denom )
@@ -1116,7 +1162,11 @@ void DMVR::xCopyAndPad( const CodingUnit& cu, PelUnitBuf& pcPad, RefPicList refI
   int width, height;
   Mv cMv;
 
+#if ENABLE_SPATIAL_SCALABLE
+  const Picture* refPic = cu.slice->getRefPic(refId, cu.refIdx[refId])->unscaledPic;
+#else
   const Picture* refPic = cu.slice->getRefPic(refId, cu.refIdx[refId]);
+#endif
 
   static constexpr int mvShift = MV_FRACTIONAL_BITS_INTERNAL;
 
@@ -1233,7 +1283,11 @@ void DMVR::xFinalPaddedMCForDMVR( const CodingUnit& cu, PelUnitBuf* dstBuf, cons
     const Mv& cMv = mv[refId];
     Mv cMvClipped( cMv );
     clipMv(cMvClipped, cu.lumaPos(), cu.lumaSize(), *cu.cs->pcv);
+#if ENABLE_SPATIAL_SCALABLE
+    const Picture* refPic = cu.slice->getRefPic(refId, cu.refIdx[refId])->unscaledPic;
+#else
     const Picture* refPic = cu.slice->getRefPic(refId, cu.refIdx[refId]);
+#endif
     const Mv& startMv = mergeMv[refId];
     for (int compID = 0; compID < getNumberValidComponents(cu.chromaFormat); compID++)
     {
@@ -1248,14 +1302,25 @@ void DMVR::xFinalPaddedMCForDMVR( const CodingUnit& cu, PelUnitBuf* dstBuf, cons
         const PelBuf& srcBuf = refBuf[refId].bufs[compID];
         int offset = (deltaIntMvY)*srcBuf.stride + (deltaIntMvX);
 
+#if ENABLE_SPATIAL_SCALABLE
+        xPredInterBlk((ComponentID)compID, cu, refPic, cMvClipped, dstBuf[refId], true, cu.cs->slice->clpRngs.comp[compID],
+          bioApplied, false, refId, 0, 0, 0, srcBuf.buf + offset, srcBuf.stride, cu.slice->getScalingRatio(refId, cu.refIdx[refId]));
+#else
         xPredInterBlk((ComponentID)compID, cu, nullptr, cMvClipped, dstBuf[refId], true, cu.cs->slice->clpRngs.comp[compID],
           bioApplied, false, refId, 0, 0, 0, srcBuf.buf + offset, srcBuf.stride);
+#endif
       }
       else
       {
+#if ENABLE_SPATIAL_SCALABLE
+        xPredInterBlk((ComponentID)compID, cu, refPic, cMvClipped, dstBuf[refId], true, cu.cs->slice->clpRngs.comp[compID],
+          bioApplied, false, refId, 0, 0, 0, NULL, 0, cu.slice->getScalingRatio(refId, cu.refIdx[refId]));
+      }
+#else
         xPredInterBlk((ComponentID)compID, cu, refPic, cMvClipped, dstBuf[refId], true, cu.cs->slice->clpRngs.comp[compID],
           bioApplied, false, refId, 0, 0, 0);
       }
+#endif
     }
   }
 }
@@ -1315,26 +1380,42 @@ void DMVR::xProcessDMVR( const CodingUnit& cu, PelUnitBuf& pcYuvDst, const ClpRn
 
     /*L0 MC for refinement*/
     {
+#if ENABLE_SPATIAL_SCALABLE
+      const Picture* refPic = cu.slice->getRefPic(L0, cu.refIdx[L0])->unscaledPic;
+#else
       const Picture* refPic = cu.slice->getRefPic(L0, cu.refIdx[L0]);
+#endif
 
       PelUnitBuf yuvTmp = PelUnitBuf(cu.chromaFormat, PelBuf(m_yuvTmp[L0].getBuf(COMP_Y).buf + dstOffset, bilinearBufStride, cu.lwidth() + padSize, cu.lheight() + padSize));
 
       mergeMVL0.hor -= (DMVR_NUM_ITERATION << MV_FRACTIONAL_BITS_INTERNAL);
       mergeMVL0.ver -= (DMVR_NUM_ITERATION << MV_FRACTIONAL_BITS_INTERNAL);
 
+#if ENABLE_SPATIAL_SCALABLE
+      xPredInterBlk(COMP_Y, cu, refPic, mergeMVL0, yuvTmp, true, clpRngs.comp[COMP_Y], false, false, L0, cu.lwidth() + padSize, cu.lheight() + padSize, true, NULL, 0, cu.slice->getScalingRatio(L0, cu.refIdx[L0]));
+#else
       xPredInterBlk(COMP_Y, cu, refPic, mergeMVL0, yuvTmp, true, clpRngs.comp[COMP_Y], false, false, L0, cu.lwidth() + padSize, cu.lheight() + padSize, true);
+#endif
     }
 
     /*L1 MC for refinement*/
     {
+#if ENABLE_SPATIAL_SCALABLE
+      const Picture* refPic = cu.slice->getRefPic(L1, cu.refIdx[L1])->unscaledPic;
+#else
       const Picture* refPic = cu.slice->getRefPic(L1, cu.refIdx[L1]);
+#endif
 
       PelUnitBuf yuvTmp = PelUnitBuf(cu.chromaFormat, PelBuf(m_yuvTmp[L1].getBuf(COMP_Y).buf + dstOffset, bilinearBufStride, cu.lwidth() + padSize, cu.lheight() + padSize));
 
       mergeMVL1.hor -= (DMVR_NUM_ITERATION << MV_FRACTIONAL_BITS_INTERNAL);
       mergeMVL1.ver -= (DMVR_NUM_ITERATION << MV_FRACTIONAL_BITS_INTERNAL);
 
+#if ENABLE_SPATIAL_SCALABLE
+      xPredInterBlk(COMP_Y, cu, refPic, mergeMVL1, yuvTmp, true, clpRngs.comp[COMP_Y], false, false, L1, cu.lwidth() + padSize, cu.lheight() + padSize, true, NULL, 0, cu.slice->getScalingRatio(L1, cu.refIdx[L1]));
+#else
       xPredInterBlk(COMP_Y, cu, refPic, mergeMVL1, yuvTmp, true, clpRngs.comp[COMP_Y], false, false, L1, cu.lwidth() + padSize, cu.lheight() + padSize, true);
+#endif
     }
 
     // point mc buffer to center point to avoid multiplication to reach each iteration to the beginning
@@ -1533,7 +1614,11 @@ bool InterPredInterpolation::isSubblockVectorSpreadOverLimit(int a, int b, int c
   return false;
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+void InterPredInterpolation::xPredAffineBlk(const ComponentID compID, const CodingUnit& cu, const Picture* refPic, const Mv* _mv, PelUnitBuf& dstPic, const bool bi, const ClpRng& clpRng, const RefPicList refPicList, const std::pair<int, int> scalingRatio)
+#else
 void InterPredInterpolation::xPredAffineBlk(const ComponentID compID, const CodingUnit& cu, const Picture* refPic, const Mv* _mv, PelUnitBuf& dstPic, const bool bi, const ClpRng& clpRng, const RefPicList refPicList)
+#endif
 {
   const ChromaFormat chFmt = cu.chromaFormat;
   int iScaleX = getComponentScaleX(compID, chFmt);
@@ -1599,6 +1684,9 @@ void InterPredInterpolation::xPredAffineBlk(const ComponentID compID, const Codi
   const int profThres = 1 << (iBit + (m_isBi ? 1 : 0));
   enablePROF &= !m_encOnly || cu.slice->checkLDC || iDMvHorX > profThres || iDMvHorY > profThres || iDMvVerX > profThres || iDMvVerY > profThres || iDMvHorX < -profThres || iDMvHorY < -profThres || iDMvVerX < -profThres || iDMvVerY < -profThres;
   enablePROF &= pps.picWidthInLumaSamples == refPic->cs->pps->picWidthInLumaSamples && pps.picHeightInLumaSamples == refPic->cs->pps->picHeightInLumaSamples;
+#if ENABLE_SPATIAL_SCALABLE
+  enablePROF &= (refPic->isRefScaled(cu.cs->pps) == false);
+#endif
 
   bool isLast = enablePROF ? false : !bi;
 
@@ -1772,7 +1860,11 @@ void InterPredInterpolation::xPredAffineBlk(const ComponentID compID, const Codi
         {
           wrapRef = false;
           m_storedMv[h / AFFINE_MIN_BLOCK_SIZE * MVBUFFER_SIZE + w / AFFINE_MIN_BLOCK_SIZE].set(iMvScaleTmpHor, iMvScaleTmpVer);
+#if ENABLE_SPATIAL_SCALABLE
+          if( scalingRatio == SCALE_1X ) 
+#else
        //   if( scalingRatio == SCALE_1X ) 
+#endif
           {
             iMvScaleTmpHor = std::min<int>(iHorMax, std::max<int>(iHorMin, iMvScaleTmpHor));
             iMvScaleTmpVer = std::min<int>(iVerMax, std::max<int>(iVerMin, iMvScaleTmpVer));
@@ -1791,7 +1883,11 @@ void InterPredInterpolation::xPredAffineBlk(const ComponentID compID, const Codi
         else
         {
           wrapRef = false;
+#if ENABLE_SPATIAL_SCALABLE
+          if( scalingRatio == SCALE_1X ) 
+#else
 //          if( scalingRatio == SCALE_1X ) 
+#endif
           {
             curMv.hor = std::min<int>(iHorMax, std::max<int>(iHorMin, curMv.hor));
             curMv.ver = std::min<int>(iVerMax, std::max<int>(iVerMin, curMv.ver));
@@ -1801,6 +1897,14 @@ void InterPredInterpolation::xPredAffineBlk(const ComponentID compID, const Codi
         iMvScaleTmpVer = curMv.ver;
       }
 
+#if ENABLE_SPATIAL_SCALABLE
+      if (xPredInterBlkRPR(scalingRatio, *cu.cs->pps, CompArea(compID, chFmt, cu.blocks[compID].offset(w, h), Size(blockWidth, blockHeight)), refPic, Mv(iMvScaleTmpHor, iMvScaleTmpVer), dstBuf.buf + w + h * dstBuf.stride, dstBuf.stride, bi, wrapRef, clpRng, 2))
+      {
+        CHECK(enablePROF, "PROF should be disabled with RPR");
+      }
+      else
+      {
+#endif
       // get the MV in high precision
       int xFrac, yFrac, xInt, yInt;
 
@@ -1895,10 +1999,194 @@ void InterPredInterpolation::xPredAffineBlk(const ComponentID compID, const Codi
 
         xFpApplyPROF(dstY, dstBuf.stride, src, dstExtBuf.stride, blockWidth, blockHeight, gX, gY, gradXBuf.stride, dMvScaleHor, dMvScaleVer, blockWidth, bi, shiftNum, offset, clpRng);
       }
+#if ENABLE_SPATIAL_SCALABLE
+      }
+#endif
     }
   }
 
 }
+
+#if ENABLE_SPATIAL_SCALABLE
+bool InterPredInterpolation::xPredInterBlkRPR(const std::pair<int, int>& scalingRatio, const PPS& pps, const CompArea& blk, const Picture* refPic, const Mv& mv, Pel* dst, const int dstStride, const bool bi, const bool wrapRef, const ClpRng& clpRng, const int filterIndex, const bool useAltHpelIf)
+{
+  const ChromaFormat  chFmt = blk.chromaFormat;
+  const ComponentID compID = blk.compID;
+  const bool          rndRes = !bi;
+
+  int shiftHor = MV_FRACTIONAL_BITS_INTERNAL + (isLuma(compID) ? 0 : 1);
+  int shiftVer = MV_FRACTIONAL_BITS_INTERNAL + (isLuma(compID) ? 0 : 1);
+
+  int width = blk.width;
+  int height = blk.height;
+  CPelBuf refBuf;
+
+  const bool scaled = refPic->isRefScaled(&pps);
+
+  if (scaled)
+  {
+    int row, col;
+    int refPicWidth = refPic->cs->pps->picWidthInLumaSamples;
+    int refPicHeight = refPic->cs->pps->picHeightInLumaSamples;
+
+    int xFilter = filterIndex;
+    int yFilter = filterIndex;
+    const int rprThreshold1 = (1 << SCALE_RATIO_BITS) * 5 / 4;
+    const int rprThreshold2 = (1 << SCALE_RATIO_BITS) * 7 / 4;
+    if (filterIndex == 0)
+    {
+      if (scalingRatio.first > rprThreshold2)
+      {
+        xFilter = 4;
+      }
+      else if (scalingRatio.first > rprThreshold1)
+      {
+        xFilter = 3;
+      }
+
+      if (scalingRatio.second > rprThreshold2)
+      {
+        yFilter = 4;
+      }
+      else if (scalingRatio.second > rprThreshold1)
+      {
+        yFilter = 3;
+      }
+    }
+    if (filterIndex == 2)
+    {
+      if (isLuma(compID))
+      {
+        if (scalingRatio.first > rprThreshold2)
+        {
+          xFilter = 6;
+        }
+        else if (scalingRatio.first > rprThreshold1)
+        {
+          xFilter = 5;
+        }
+
+        if (scalingRatio.second > rprThreshold2)
+        {
+          yFilter = 6;
+        }
+        else if (scalingRatio.second > rprThreshold1)
+        {
+          yFilter = 5;
+        }
+      }
+      else
+      {
+        if (scalingRatio.first > rprThreshold2)
+        {
+          xFilter = 4;
+        }
+        else if (scalingRatio.first > rprThreshold1)
+        {
+          xFilter = 3;
+        }
+
+        if (scalingRatio.second > rprThreshold2)
+        {
+          yFilter = 4;
+        }
+        else if (scalingRatio.second > rprThreshold1)
+        {
+          yFilter = 3;
+        }
+      }
+    }
+
+    const int posShift = SCALE_RATIO_BITS - 4;
+    int stepX = (scalingRatio.first + 8) >> 4;
+    int stepY = (scalingRatio.second + 8) >> 4;
+    int64_t x0Int;
+    int64_t y0Int;
+    int offX = 1 << (posShift - shiftHor - 1);
+    int offY = 1 << (posShift - shiftVer - 1);
+
+    const int64_t posX = ((blk.pos().x << getComponentScaleX(compID, chFmt)) - (pps.scalingWindow.winLeftOffset * SPS::getWinUnitX(chFmt))) >> getComponentScaleX(compID, chFmt);
+    const int64_t posY = ((blk.pos().y << getComponentScaleY(compID, chFmt)) - (pps.scalingWindow.winTopOffset * SPS::getWinUnitY(chFmt))) >> getComponentScaleY(compID, chFmt);
+
+    int addX = isLuma(compID) ? 0 : int(1 - refPic->cs->sps->horCollocatedChroma) * 8 * (scalingRatio.first - SCALE_1X.first);
+    int addY = isLuma(compID) ? 0 : int(1 - refPic->cs->sps->verCollocatedChroma) * 8 * (scalingRatio.second - SCALE_1X.second);
+
+    int boundLeft = 0;
+    int boundRight = refPicWidth >> getComponentScaleX(compID, chFmt);
+    int boundTop = 0;
+    int boundBottom = refPicHeight >> getComponentScaleY(compID, chFmt);
+    if (refPic->cs->pps->subPics.size() > 1)
+    {
+      const SubPic& curSubPic = pps.getSubPicFromPos(blk.lumaPos());
+      if (curSubPic.treatedAsPic)
+      {
+        boundLeft = curSubPic.subPicLeft >> getComponentScaleX(compID, chFmt);
+        boundRight = curSubPic.subPicRight >> getComponentScaleX(compID, chFmt);
+        boundTop = curSubPic.subPicTop >> getComponentScaleY(compID, chFmt);
+        boundBottom = curSubPic.subPicBottom >> getComponentScaleY(compID, chFmt);
+      }
+    }
+
+    x0Int = ((posX << (4 + getComponentScaleX(compID, chFmt))) + mv.hor) * (int64_t)scalingRatio.first + addX;
+    x0Int = SIGN(x0Int) * ((llabs(x0Int) + ((long long)1 << (7 + getComponentScaleX(compID, chFmt)))) >> (8 + getComponentScaleX(compID, chFmt))) + ((refPic->scalingWindow.winLeftOffset * SPS::getWinUnitX(chFmt)) << ((posShift - getComponentScaleX(compID, chFmt))));
+
+    y0Int = ((posY << (4 + getComponentScaleY(compID, chFmt))) + mv.ver) * (int64_t)scalingRatio.second + addY;
+    y0Int = SIGN(y0Int) * ((llabs(y0Int) + ((long long)1 << (7 + getComponentScaleY(compID, chFmt)))) >> (8 + getComponentScaleY(compID, chFmt))) + ((refPic->scalingWindow.winTopOffset * SPS::getWinUnitY(chFmt)) << ((posShift - getComponentScaleY(compID, chFmt))));
+
+    const int extSize = isLuma(compID) ? 1 : 2;
+    int vFilterSize = isLuma(compID) ? NTAPS_LUMA : NTAPS_CHROMA;
+
+    int yInt0 = ((int32_t)y0Int + offY) >> posShift;
+    yInt0 = std::min(std::max(boundTop - (NTAPS_LUMA / 2), yInt0), boundBottom + (NTAPS_LUMA / 2));
+
+    int xInt0 = ((int32_t)x0Int + offX) >> posShift;
+    xInt0 = std::min(std::max(boundLeft - (NTAPS_LUMA / 2), xInt0), boundRight + (NTAPS_LUMA / 2));
+
+    int refHeight = ((((int32_t)y0Int + (height - 1) * stepY) + offY) >> posShift) - ((((int32_t)y0Int + 0 * stepY) + offY) >> posShift) + 1;
+    refHeight = std::max<int>(1, refHeight);
+
+    CHECK(MAX_CU_SIZE * MAX_SCALING_RATIO + 16 < refHeight + vFilterSize - 1 + extSize, "Buffer is not large enough, increase MAX_SCALING_RATIO");
+
+    Pel buffer[(MAX_CU_SIZE + 16) * (MAX_CU_SIZE * MAX_SCALING_RATIO + 16)];
+    int tmpStride = width;
+    int xInt = 0, yInt = 0;
+
+    for (col = 0; col < width; col++)
+    {
+      int posX = (int32_t)x0Int + col * stepX;
+      xInt = (posX + offX) >> posShift;
+      xInt = std::min(std::max(boundLeft - (NTAPS_LUMA / 2), xInt), boundRight + (NTAPS_LUMA / 2));
+      int xFrac = ((posX + offX) >> (posShift - shiftHor)) & ((1 << shiftHor) - 1);
+
+      CHECK(xInt0 > xInt, "Wrong horizontal starting point");
+
+      Position offset = Position(xInt, yInt0);
+      refBuf = wrapRef ? refPic->getRecoWrapBuf(CompArea(compID, chFmt, offset, Size(1, refHeight))) : refPic->getRecoBuf(CompArea(compID, chFmt, offset, Size(1, refHeight)));
+      Pel* tempBuf = buffer + col;
+
+      m_if.filterHor(compID, (Pel*)refBuf.buf - ((vFilterSize >> 1) - 1) * refBuf.stride, refBuf.stride, tempBuf,
+        tmpStride, 1, refHeight + vFilterSize - 1 + extSize, xFrac, false, chFmt, clpRng, useAltHpelIf && scalingRatio.first == 1 << SCALE_RATIO_BITS, xFilter, false);
+    }
+
+    for (row = 0; row < height; row++)
+    {
+      int posY = (int32_t)y0Int + row * stepY;
+      yInt = (posY + offY) >> posShift;
+      yInt = std::min(std::max(boundTop - (NTAPS_LUMA / 2), yInt), boundBottom + (NTAPS_LUMA / 2));
+      int yFrac = ((posY + offY) >> (posShift - shiftVer)) & ((1 << shiftVer) - 1);
+
+      CHECK(yInt0 > yInt, "Wrong vertical starting point");
+
+      Pel* tempBuf = buffer + (yInt - yInt0) * tmpStride;
+
+      m_if.filterVer(compID, tempBuf + ((vFilterSize >> 1) - 1) * tmpStride, tmpStride, dst + row * dstStride,
+        dstStride, width, 1, yFrac, false, rndRes, chFmt, clpRng, useAltHpelIf && scalingRatio.second == 1 << SCALE_RATIO_BITS, yFilter, false);
+    }
+  }
+
+  return scaled;
+}
+#endif
 
 void InterPrediction::xFillIBCBuffer(CodingUnit& cu)
 {

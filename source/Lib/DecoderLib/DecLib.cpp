@@ -1519,7 +1519,12 @@ bool DecLib::xDecodeSlice(InputNALUnit &nalu, int& iSkipFrame, int iPOCLastDispl
 
   slice->checkCRA(slice->rpl[0], slice->rpl[1], m_pocCRA, m_associatedIRAPType, m_cListPic);
   slice->constructRefPicList(m_cListPic, true);
+#if ENABLE_SPATIAL_SCALABLE
+  Picture* scaledRefPic[MAX_NUM_REF] = {};
+  slice->scaleRefPicList( scaledRefPic, m_pic->cs->picHeader, m_parameterSetManager.getAPSs(), m_picHeader.lmcsAps, m_picHeader.scalingListAps, true );
+#else
 //  slice->scaleRefPicList( scaledRefPic, m_pic->cs->picHeader, m_parameterSetManager.getAPSs(), m_picHeader.lmcsAps, m_picHeader.scalingListAps, true );
+#endif
 
   if (!slice->isIntra())
   {
@@ -1607,6 +1612,10 @@ bool DecLib::xDecodeSlice(InputNALUnit &nalu, int& iSkipFrame, int iPOCLastDispl
 
   m_bFirstSliceInPicture = false;
   m_uiSliceSegmentIdx++;
+
+#if ENABLE_SPATIAL_SCALABLE
+  slice->freeScaledRefPicList(scaledRefPic);
+#endif
 
   return false;
 }

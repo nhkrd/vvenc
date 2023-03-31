@@ -1,4 +1,4 @@
-/* -----------------------------------------------------------------------------
+﻿/* -----------------------------------------------------------------------------
 The copyright in this software is being made available under the Clear BSD
 License, included below. No patent rights, trademark rights and/or 
 other Intellectual Property Rights other than the copyrights concerning 
@@ -58,6 +58,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "apputils/VVEncAppCfg.h"
 #include "apputils/YuvFileIO.h"
 #include "vvenc/vvenc.h"
+
+#if ENABLE_SPATIAL_SCALABLE
+#include <memory>
+#endif
 
 #define MACRO_TO_STRING_HELPER(val) #val
 #define MACRO_TO_STRING(val) MACRO_TO_STRING_HELPER(val)
@@ -453,6 +457,12 @@ int VVEncAppCfg::parse( int argc, char* argv[], vvenc_config* c, std::ostream& r
   IStreamToArr<char>                toDecodeBitstreams1           ( &c->m_decodeBitstreams[1][0], VVENC_MAX_STRING_LEN  );
   IStreamToArr<char>                toSummaryOutFilename          ( &c->m_summaryOutFilename[0], VVENC_MAX_STRING_LEN  );
   IStreamToArr<char>                toSummaryPicFilenameBase      ( &c->m_summaryPicFilenameBase[0], VVENC_MAX_STRING_LEN  );
+#if ENABLE_SPATIAL_SCALABLE
+  std::string predDirectionArray;
+  std::string refLayerIdxStr[VVENC_MAX_VPS_LAYERS];
+  std::string olsOutputLayerStr[VVENC_MAX_VPS_LAYERS];
+  std::string maxTidILRefPicsPlus1Str[VVENC_MAX_VPS_LAYERS];
+#endif
 
   po::Options opts;
   if( m_easyMode )
@@ -584,6 +594,9 @@ int VVEncAppCfg::parse( int argc, char* argv[], vvenc_config* c, std::ostream& r
   ("Profile",                                           toProfile,                                           "select profile (main10, main10_stillpic)")
   ("Level",                                             toLevel,                                             "Level limit (1.0, 2.0,2.1, 3.0,3.1, 4.0,4.1, 5.0,5.1,5.2, 6.0,6.1,6.2,6.3, 15.5)")
   ("Tier",                                              toLevelTier,                                         "Tier to use for interpretation of level (main or high)")
+#if ENABLE_SPATIAL_SCALABLE
+  ("MultiLayerEnabledFlag",                             c->m_multiLayerEnabledFlag,                          "Bitstream might contain more than one layer")
+#endif
   ;
 
   if( m_easyMode )
@@ -965,6 +978,28 @@ int VVEncAppCfg::parse( int argc, char* argv[], vvenc_config* c, std::ostream& r
     ("FastTTSplit",                                     c->m_fastTTSplit,                                    "Fast method for TT split" )
     ;
 
+#if ENABLE_SPATIAL_SCALABLE
+    opts.addOptions()
+    ("MaxLayers",                                       c->m_maxLayers,                                      "Max number of layers")
+    //("EnableOperatingPointInformation",                 c->m_OPIEnabled,                                     "Enables writing of Operating Point Information(OPI)")
+    //("MaxTemporalLayer",                                c->m_maxTemporalLayer,                               "Maximum temporal layer to be signalled in OPI")
+    //("TargetOutputLayerSet",                            c->m_targetOlsIdx,                                   "Target output layer set index to be signalled in OPI")
+    ("MaxSublayers",                                    c->m_maxSublayers,                                   "Max number of Sublayers")
+    ("DefaultPtlDpbHrdMaxTidFlag",                      c->m_defaultPtlDpbHrdMaxTidFlag,                     "specifies that the syntax elements vps_ptl_max_tid[ i ], vps_dpb_max_tid[ i ], and vps_hrd_max_tid[ i ] are not present and are inferred to be equal to the default value vps_max_sublayers_minus1")
+    ("AllIndependentLayersFlag",                        c->m_allIndependentLayersFlag,                       "All layers are independent layer")
+    ("AllowablePredDirection",                          predDirectionArray,                                  "prediction directions allowed for i-th temporal layer")
+    ("LayerId%d",                                       c->m_layerId, VVENC_MAX_VPS_LAYERS,                  "Layer ID")
+    ("NumRefLayers%d",                                  c->m_numRefLayers, VVENC_MAX_VPS_LAYERS,             "Number of direct reference layer index of i-th layer")
+    ("RefLayerIdx%d",                                   refLayerIdxStr, VVENC_MAX_VPS_LAYERS,                "Reference layer index(es)")
+    ("EachLayerIsAnOlsFlag",                            c->m_eachLayerIsAnOlsFlag,                           "Each layer is an OLS layer flag")
+    ("OlsModeIdc",                                      c->m_olsModeIdc,                                     "Output layer set mode")
+    ("NumOutputLayerSets",                              c->m_numOutputLayerSets,                             "Number of output layer sets")
+    ("OlsOutputLayer%d",                                olsOutputLayerStr, VVENC_MAX_VPS_LAYERS,             "Output layer index of i-th OLS")
+    ("NumPTLsInVPS",                                    c->m_numPtlsInVps,                                   "Number of profile_tier_level structures in VPS")
+    ("AvoidIntraInDepLayers",                           c->m_avoidIntraInDepLayer,                           "Replaces I pictures in dependent layers with B pictures")
+    ("MaxTidILRefPicsPlusOneLayerId%d",                 maxTidILRefPicsPlus1Str, VVENC_MAX_VPS_LAYERS,       "Maximum temporal ID for inter-layer reference pictures plus 1 of i-th layer, 0 for IRAP only")
+    ;
+#endif
     opts.setSubSection("Threading, performance");
     opts.addOptions()
     ("MaxParallelFrames",                               c->m_maxParallelFrames,                              "Maximum number of frames to be processed in parallel(0:off, >=2: enable parallel frames)")
@@ -1047,6 +1082,21 @@ int VVEncAppCfg::parse( int argc, char* argv[], vvenc_config* c, std::ostream& r
     ;
   }
 
+#if ENABLE_SPATIAL_SCALABLE
+  std::unique_ptr<IStreamToEnum<vvencLevel>> levelPtl[VVENC_MAX_NUM_OLSS];
+  for (int i = 0; i < VVENC_MAX_NUM_OLSS; i++)
+  {
+    levelPtl[i] = std::make_unique<IStreamToEnum<vvencLevel>>(&c->m_levelPtl[i], &LevelToEnumMap);
+    std::ostringstream cOSS1;
+    cOSS1 << "LevelPTL" << i;
+    opts.addOptions()(cOSS1.str(), *levelPtl[i]);
+
+    std::ostringstream cOSS2;
+    cOSS2 << "OlsPTLIdx" << i;
+    opts.addOptions()(cOSS2.str(), c->m_olsPtlIdx[i], 0);
+  }
+#endif
+
   //
   // parse command line parameters and read configuration files
   //
@@ -1054,6 +1104,19 @@ int VVEncAppCfg::parse( int argc, char* argv[], vvenc_config* c, std::ostream& r
   {
     po::ErrorReporter err;
     const std::list<const char*>& argv_unhandled = po::scanArgv( opts, argc, (const char**) argv, err );
+
+#if ENABLE_SPATIAL_SCALABLE
+    strncpy(c->m_predDirectionArray, predDirectionArray.c_str(), VVENC_MAX_STRING_LEN);
+    for (int i = 0; i < VVENC_MAX_VPS_LAYERS; i++) {
+      strncpy(c->m_refLayerIdxStr[i], refLayerIdxStr[i].c_str(), VVENC_MAX_STRING_LEN);
+    }
+    for (int i = 0; i < VVENC_MAX_VPS_LAYERS; i++) {
+      strncpy(c->m_olsOutputLayerStr[i], olsOutputLayerStr[i].c_str(), VVENC_MAX_STRING_LEN);
+    }
+    for (int i = 0; i < VVENC_MAX_VPS_LAYERS; i++) {
+      strncpy(c->m_maxTidILRefPicsPlus1Str[i], maxTidILRefPicsPlus1Str[i].c_str(), VVENC_MAX_STRING_LEN);
+    }
+#endif
 
     if ( do_help || argc == 0 )
     {

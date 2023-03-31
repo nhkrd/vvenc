@@ -787,11 +787,19 @@ void RateCtrl::xUpdateAfterPicRC( const Picture* pic )
 void RateCtrl::initRateControlPic( Picture& pic, Slice* slice, int& qp, double& finalLambda )
 {
   EncRCPic* encRcPic = new EncRCPic;
+#if ENABLE_SPATIAL_SCALABLE
+  encRcPic->create( encRCSeq, pic.slices[ 0 ]->isIRAP() ? 0 : pic.slices[ 0 ]->TLayer + 1, pic.slices[ 0 ]->poc );
+#else
   encRcPic->create( encRCSeq, pic.slices[ 0 ]->isIntra() ? 0 : pic.slices[ 0 ]->TLayer + 1, pic.slices[ 0 ]->poc );
+#endif
   pic.encRCPic = encRcPic;
   encRCPic = encRcPic;
 
+#if ENABLE_SPATIAL_SCALABLE
+  const int frameLevel = ( slice->isIRAP() ? 0 : slice->TLayer + 1 );
+#else
   const int frameLevel = ( slice->isIntra() ? 0 : slice->TLayer + 1 );
+#endif
   double lambda = encRCSeq->maxEstLambda;
   int   sliceQP = MAX_QP;
 

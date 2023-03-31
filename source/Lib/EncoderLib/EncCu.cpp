@@ -717,7 +717,11 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
       else
       {
         // add first pass modes
+#if ENABLE_SPATIAL_SCALABLE
+        if ( !slice.isIntra() &&                    !( cs.area.lwidth() == 4 && cs.area.lheight() == 4 ) && !partitioner.isConsIntra() )
+#else
         if ( !slice.isIntra() && !slice.isIRAP() && !( cs.area.lwidth() == 4 && cs.area.lheight() == 4 ) && !partitioner.isConsIntra() )
+#endif
         {
           // add inter modes
           EncTestMode encTestModeSkip = { ETM_MERGE_SKIP, ETO_STANDARD, qp, lossless };

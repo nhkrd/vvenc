@@ -64,9 +64,16 @@ struct OutputNALUnit : public NALUnit
    */
   OutputNALUnit(
     vvencNalUnitType nalUnitType,
+#if ENABLE_SPATIAL_SCALABLE
+    uint32_t layerId = 0,
+#endif
     uint32_t temporalID = 0,
     uint32_t reserved_zero_6bits = 0)
+#if ENABLE_SPATIAL_SCALABLE
+  : NALUnit(nalUnitType, temporalID, reserved_zero_6bits, 0, layerId)
+#else
   : NALUnit(nalUnitType, temporalID, reserved_zero_6bits)
+#endif
   , m_Bitstream()
   {}
 

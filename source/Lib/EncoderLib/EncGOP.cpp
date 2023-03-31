@@ -57,6 +57,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "BitAllocation.h"
 #include "EncHRD.h"
 #include "Utilities/MsgLog.h"
+#if ENABLE_SPATIAL_SCALABLE
+#include "CommonLib/ProfileLevelTier.h"
+#endif
 
 #include <list>
 
@@ -233,16 +236,30 @@ void trySkipOrDecodePicture( bool& decPic, bool& encPic, const VVEncCfg& cfg, Pi
 // Constructor / destructor / initialization / destroy
 // ====================================================================================================================
 
+#if ENABLE_SPATIAL_SCALABLE
+EncGOP::EncGOP( MsgLog& logger, EncLibCommonStage& encLibCommonStage, uint32_t layerId )
+#else
 EncGOP::EncGOP( MsgLog& logger )
+#endif
   : msg                  ( logger )
   , m_recYuvBufFunc      ( nullptr )
   , m_recYuvBufCtx       ( nullptr )
   , m_threadPool         ( nullptr )
   , m_pcEncCfg           ( nullptr )
   , m_pcRateCtrl         ( nullptr )
+#if ENABLE_SPATIAL_SCALABLE
+  , m_gopApsMap          ( encLibCommonStage.getApsMap() )
+  , m_spsMap             ( encLibCommonStage.getSpsMap() )
+  , m_ppsMap             ( encLibCommonStage.getPpsMap() )
+#else
   , m_gopApsMap          ( MAX_NUM_APS * MAX_NUM_APS_TYPE )
   , m_spsMap             ( MAX_NUM_SPS )
   , m_ppsMap             ( MAX_NUM_PPS )
+#endif
+#if ENABLE_SPATIAL_SCALABLE
+    , m_VPS                ( encLibCommonStage.getVPS() )
+    , m_layerDecPicBuffering ( encLibCommonStage.getDecPicBuffering() )
+#endif
   , m_isPreAnalysis      ( false )
   , m_bFirstInit         ( true )
   , m_bFirstWrite        ( true )
@@ -261,6 +278,9 @@ EncGOP::EncGOP( MsgLog& logger )
   , m_associatedIRAPPOC  ( 0 )
   , m_associatedIRAPType ( VVENC_NAL_UNIT_CODED_SLICE_IDR_N_LP )
   , m_trySkipOrDecodePicture( false )
+#if ENABLE_SPATIAL_SCALABLE
+  , m_layerId            ( layerId )
+#endif
 {
 }
 
@@ -287,9 +307,13 @@ EncGOP::~EncGOP()
   m_nextPocOffset.clear();
   m_pocToGopId.clear();
 
+#if ENABLE_SPATIAL_SCALABLE
+  // following codes (cleanup parameter sets) are moved to main
+#else
   // cleanup parameter sets
   m_spsMap.clearMap();
   m_ppsMap.clearMap();
+#endif
 }
 
 void EncGOP::init( const VVEncCfg& encCfg, RateCtrl& rateCtrl, NoMallocThreadPool* threadPool, bool isPreAnalysis )
@@ -301,12 +325,25 @@ void EncGOP::init( const VVEncCfg& encCfg, RateCtrl& rateCtrl, NoMallocThreadPoo
 
   // setup parameter sets
   const int dciId = m_pcEncCfg->m_decodingParameterSetEnabled ? 1 : 0;
+#if ENABLE_SPATIAL_SCALABLE
+  SPS& sps0 = *(m_spsMap.allocatePS(m_VPS.generalLayerIdx[m_layerId])); // NOTE: implementations that use more than 1 SPS need to be aware of activation issues.
+  PPS& pps0 = *(m_ppsMap.allocatePS(m_VPS.generalLayerIdx[m_layerId]));
+  xInitVPS(m_VPS);       // NOTE : Set the config parameter to the VPS.
+  xInitSPS(sps0);
+  sps0.dciId = m_DCI.dciId;
+  for (int i = 0; i < VVENC_MAX_TLAYER; i++)
+  {
+    m_layerDecPicBuffering[m_layerId * VVENC_MAX_TLAYER + i] = m_pcEncCfg->m_maxDecPicBuffering[i];
+  }
+  xInitVPS(sps0, m_VPS); // NOTE : Initialize the VPS with SPS. Same implementation as VTM.
+#else
   SPS& sps0       = *( m_spsMap.allocatePS( 0 ) ); // NOTE: implementations that use more than 1 SPS need to be aware of activation issues.
   PPS& pps0       = *( m_ppsMap.allocatePS( 0 ) );
 
   xInitSPS( sps0 );
   sps0.dciId = m_DCI.dciId;
   xInitVPS( m_VPS );
+#endif
   xInitDCI( m_DCI, sps0, dciId );
   xInitPPS( pps0, sps0 );
   xInitRPL( sps0 );
@@ -392,6 +429,9 @@ void EncGOP::initPicture( Picture* pic )
 {
   pic->encTime.startTimer();
 
+#if ENABLE_SPATIAL_SCALABLE
+  pic->layerId = m_layerId;
+#endif
   pic->gopId  = xGetGopIdFromPoc( pic->poc );
   pic->TLayer = m_pcEncCfg->m_GOPList[ pic->gopId ].m_temporalId;
 
@@ -399,7 +439,16 @@ void EncGOP::initPicture( Picture* pic )
 
   CHECK( m_ppsMap.getFirstPS() == nullptr || m_spsMap.getPS( m_ppsMap.getFirstPS()->spsId ) == nullptr, "picture set not initialised" );
 
+#if ENABLE_SPATIAL_SCALABLE
+  uint32_t ppsID = 0;
+  if (m_VPS.maxLayers > 1)
+  {
+    ppsID = m_VPS.generalLayerIdx[m_layerId];
+  }
+  const PPS& pps = *(m_ppsMap.getPS(ppsID));
+#else
   const PPS& pps = *( m_ppsMap.getFirstPS() );
+#endif
   const SPS& sps = *( m_spsMap.getPS( pps.spsId ) );
 
   if( pic->cs && pic->cs->picHeader )
@@ -469,7 +518,12 @@ void EncGOP::processPictures( const PicList& picList, bool flush, AccessUnitList
   xOutputRecYuv( picList );
 
   // release pictures not needed andmore
+#if ENABLE_SPATIAL_SCALABLE
+  // Do not enable allDone while doneList is not empty due to higher layer encoding that depends on the lower layers of the multilayer.
+  const bool allDone = flush && m_numPicsCoded >= m_picCount && !doneList.size();
+#else
   const bool allDone = flush && m_numPicsCoded >= m_picCount;
+#endif
   xReleasePictures( picList, freeList, allDone );
 
   // clear output access unit
@@ -699,6 +753,10 @@ void EncGOP::xOutputRecYuv( const PicList& picList )
     // ordered YUV output
     for( auto pic : picList )
     {
+#if ENABLE_SPATIAL_SCALABLE
+      if ( pic->layerId != m_layerId )
+        continue;
+#endif
       if( pic->poc < m_pocRecOut )
         continue;
       if( ! pic->isReconstructed || pic->poc != m_pocRecOut )
@@ -729,14 +787,25 @@ void EncGOP::xReleasePictures( const PicList& picList, PicList& freeList, bool a
 {
   for( auto pic : picList )
   {
+#if ENABLE_SPATIAL_SCALABLE
+    if( allDone || ( pic->isFinished && ! pic->isNeededForOutput && ! pic->isReferenced && pic->refCounter <= 0 && pic->layerId == m_layerId ) )
+#else
     if( allDone || ( pic->isFinished && ! pic->isNeededForOutput && ! pic->isReferenced && pic->refCounter <= 0 ) )
+#endif
       freeList.push_back( pic );
   }
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+void EncGOP::printOutSummary( const bool printMSEBasedSNR, const bool printSequenceMSE, const bool printHexPsnr, const int layerId )
+#else
 void EncGOP::printOutSummary( const bool printMSEBasedSNR, const bool printSequenceMSE, const bool printHexPsnr )
+#endif
 {
 
+#if ENABLE_SPATIAL_SCALABLE
+  msg.log(VVENC_INFO, "\nLayerId %2d", m_layerId);
+#endif
   if( m_pcEncCfg->m_decodeBitstreams[0][0] != '\0' && m_pcEncCfg->m_decodeBitstreams[1][0] != '\0' && m_pcEncCfg->m_fastForwardToPOC < 0 )
   {
     CHECK( !( m_numPicsCoded == m_AnalyzeAll.getNumPic() ), "Unspecified error" );
@@ -758,7 +827,11 @@ void EncGOP::printOutSummary( const bool printMSEBasedSNR, const bool printSeque
   if( m_pcEncCfg->m_verbosity >= VVENC_DETAILS )
     summary.append("\nSUMMARY --------------------------------------------------------\n");
   
+#if ENABLE_SPATIAL_SCALABLE
+  summary.append( m_AnalyzeAll.printOut('a', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths, layerId));
+#else
   summary.append( m_AnalyzeAll.printOut('a', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths));
+#endif
 
   if( m_pcEncCfg->m_verbosity < VVENC_DETAILS )
   {
@@ -767,13 +840,25 @@ void EncGOP::printOutSummary( const bool printMSEBasedSNR, const bool printSeque
   else
   {
     summary.append( "\n\nI Slices--------------------------------------------------------\n" );
+#if ENABLE_SPATIAL_SCALABLE
+    summary.append( m_AnalyzeI.printOut('i', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths, layerId));
+#else
     summary.append( m_AnalyzeI.printOut('i', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths));
+#endif
 
     summary.append( "\n\nP Slices--------------------------------------------------------\n" );
+#if ENABLE_SPATIAL_SCALABLE
+    summary.append( m_AnalyzeP.printOut('p', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths, layerId));
+#else
     summary.append( m_AnalyzeP.printOut('p', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths));
+#endif
     
     summary.append( "\n\nB Slices--------------------------------------------------------\n" );
+#if ENABLE_SPATIAL_SCALABLE
+    summary.append( m_AnalyzeB.printOut('b', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths, layerId));
+#else
     summary.append( m_AnalyzeB.printOut('b', chFmt, printMSEBasedSNR, printSequenceMSE, printHexPsnr, bitDepths));
+#endif
     msg.log( VVENC_DETAILS,summary.c_str() );
   }
 
@@ -836,7 +921,11 @@ Picture* EncGOP::xFindPicture( const PicList& picList, int poc ) const
 {
   for( auto& picItr : picList )
   {
+#if ENABLE_SPATIAL_SCALABLE
+    if (picItr->poc == poc && picItr->layerId == m_layerId)
+#else
     if( picItr->poc == poc )
+#endif
     {
       return picItr;
     }
@@ -882,6 +971,164 @@ void EncGOP::xUpdateRasInit( Slice* slice )
 
 void EncGOP::xInitVPS(VPS &vps) const
 {
+#if ENABLE_SPATIAL_SCALABLE
+  // NOTE : In VTM, the following settings are made with EncApp::xInitLibCfg()
+  //if (m_pcEncCfg->m_targetOlsIdx != 500)
+  //{
+  //  vps.targetOlsIdx = m_pcEncCfg->m_targetOlsIdx;
+  //}
+  //else
+  {
+    vps.targetOlsIdx = -1;
+  }
+
+  vps.maxLayers = m_pcEncCfg->m_maxLayers;
+
+  if (vps.maxLayers > 1)
+  {
+    vps.vpsId = 1;  //JVET_P0205 vps_video_parameter_set_id shall be greater than 0 for multi-layer coding
+  }
+  else
+  {
+    vps.vpsId = 0;
+    vps.eachLayerIsAnOls = 1; // If vps_max_layers_minus1 is equal to 0,
+                              // the value of vps_each_layer_is_an_ols_flag is inferred to be equal to 1.
+                              // Otherwise, when vps_all_independent_layers_flag is equal to 0,
+                              // the value of vps_each_layer_is_an_ols_flag is inferred to be equal to 0.
+  }
+  vps.maxSubLayers = m_pcEncCfg->m_maxSublayers;
+  if (vps.maxLayers > 1 && vps.maxSubLayers > 1)
+  {
+    vps.defaultPtlDpbHrdMaxTidFlag = m_pcEncCfg->m_defaultPtlDpbHrdMaxTidFlag;
+  }
+  if (vps.maxLayers > 1)
+  {
+    vps.allIndependentLayers = m_pcEncCfg->m_allIndependentLayersFlag;
+    if (!vps.allIndependentLayers)
+    {
+      vps.eachLayerIsAnOls = 0;
+      for (int i = 0; i < m_pcEncCfg->m_maxTempLayer; i++)
+      {
+        vps.vpsCfgPredDirection[i] = 0;
+      }
+      const int len = static_cast<int>(strnlen(m_pcEncCfg->m_predDirectionArray, VVENC_MAX_STRING_LEN));
+      for (int i = 0; i < len; i++)
+      {
+        if (m_pcEncCfg->m_predDirectionArray[i] != ' ')
+        {
+          vps.vpsCfgPredDirection[i >> 1] = int(m_pcEncCfg->m_predDirectionArray[i] - 48);
+        }
+      }
+    }
+  }
+
+  for (int i = 0; i < vps.maxLayers; i++)
+  {
+    vps.generalLayerIdx[m_pcEncCfg->m_layerId[i]] = i;
+    vps.layerId[i] = m_pcEncCfg->m_layerId[i];
+
+    if (i > 0 && !vps.allIndependentLayers)
+    {
+      vps.independentLayer[i] = m_pcEncCfg->m_numRefLayers[i] ? false : true;
+
+      if (!vps.independentLayer[i])
+      {
+        for (int j = 0, k = 0; j < i; j++)
+        {
+          std::string refLayerIdxStr = m_pcEncCfg->m_refLayerIdxStr[i];
+          if (refLayerIdxStr.find(std::to_string(j)) != std::string::npos)
+          {
+            vps.directRefLayer[i][j] = true;
+            vps.interLayerRefIdx[i][j] = k;
+            vps.directRefLayerIdx[i][k++] = j;
+          }
+          else
+          {
+            vps.directRefLayer[i][j] = false;
+          }
+        }
+        std::string maxTidILRefPicsPlus1Str = m_pcEncCfg->m_maxTidILRefPicsPlus1Str[i];
+        std::string::size_type beginStr = maxTidILRefPicsPlus1Str.find_first_not_of(" ", 0);
+        std::string::size_type endStr = maxTidILRefPicsPlus1Str.find_first_of(" ", beginStr);
+        int t = 0;
+        while (std::string::npos != beginStr || std::string::npos != endStr)
+        {
+          vps.maxTidIlRefPicsPlus1[i][t++] = std::stoi(maxTidILRefPicsPlus1Str.substr(beginStr, endStr - beginStr));
+          beginStr = maxTidILRefPicsPlus1Str.find_first_not_of(" ", endStr);
+          endStr = maxTidILRefPicsPlus1Str.find_first_of(" ", beginStr);
+        }
+      }
+    }
+  }
+
+
+  if (vps.maxLayers > 1)
+  {
+    if (vps.allIndependentLayers)
+    {
+      vps.eachLayerIsAnOls = m_pcEncCfg->m_eachLayerIsAnOlsFlag;
+      if (vps.eachLayerIsAnOls == 0)
+      {
+        vps.olsModeIdc = 2; // When vps_all_independent_layers_flag is equal to 1 and vps_each_layer_is_an_ols_flag is equal to 0, the value of vps_ols_mode_idc is inferred to be equal to 2
+      }
+    }
+    if (!vps.eachLayerIsAnOls)
+    {
+      if (!vps.allIndependentLayers)
+      {
+        vps.olsModeIdc = m_pcEncCfg->m_olsModeIdc;
+      }
+      if (vps.olsModeIdc == 2)
+      {
+        vps.numOutputLayerSets = m_pcEncCfg->m_numOutputLayerSets;
+        for (int i = 1; i < vps.numOutputLayerSets; i++)
+        {
+          for (int j = 0; j < vps.maxLayers; j++)
+          {
+            std::string olsOutputLayerStr = m_pcEncCfg->m_olsOutputLayerStr[i];
+            if (olsOutputLayerStr.find(std::to_string(j)) != std::string::npos)
+            {
+              vps.olsOutputLayer[i][j] = 1;
+            }
+            else
+            {
+              vps.olsOutputLayer[i][j] = 0;
+            }
+          }
+        }
+      }
+    }
+  }
+  CHECK(m_pcEncCfg->m_numPtlsInVps == 0, "There has to be at least one PTL structure in the VPS.");
+  vps.numPtls = m_pcEncCfg->m_numPtlsInVps;
+  vps.ptPresent[0] = 1;
+  for (int i = 0; i < vps.numPtls; i++)
+  {
+    if (i > 0)
+      vps.ptPresent[i] = 0;
+    vps.ptlMaxTemporalId[i] = vps.maxSubLayers - 1;
+  }
+  for (int i = 0; i < vps.numOutputLayerSets; i++)
+  {
+    vps.olsPtlIdx[i] = m_pcEncCfg->m_olsPtlIdx[i];
+  }
+  std::vector<ProfileTierLevel> ptls;
+  ptls.resize(vps.numPtls);
+  // PTL0 shall be the same as the one signalled in the SPS
+  ptls[0].levelIdc = m_pcEncCfg->m_level;
+  ptls[0].profileIdc = m_pcEncCfg->m_profile;
+  ptls[0].tierFlag = m_pcEncCfg->m_levelTier;
+  ptls[0].multiLayerEnabledFlag = m_pcEncCfg->m_multiLayerEnabledFlag;
+  CHECK((m_pcEncCfg->m_profile == VVENC_MAIN_10 || m_pcEncCfg->m_profile == VVENC_MAIN_10_444 || \
+    m_pcEncCfg->m_profile == VVENC_MAIN_10_STILL_PICTURE || m_pcEncCfg->m_profile == VVENC_MAIN_10_444_STILL_PICTURE) \
+    && m_pcEncCfg->m_multiLayerEnabledFlag, "ptl_multilayer_enabled_flag shall be equal to 0 for non-multilayer profiles");
+  for (int i = 1; i < vps.numPtls; i++)
+  {
+    ptls[i].levelIdc = m_pcEncCfg->m_levelPtl[i];
+  }
+  vps.profileTierLevel = ptls;
+  vps.extension = false;
+#else
   // The SPS must have already been set up.
   // set the VPS profile information.
   vps.maxLayers                   = 1;
@@ -923,7 +1170,118 @@ void EncGOP::xInitVPS(VPS &vps) const
   }
 
   vps.profileTierLevel.resize( 1 );
+#endif
 }
+
+#if ENABLE_SPATIAL_SCALABLE
+void EncGOP::xInitVPS(const SPS& sps, VPS& vps) const
+{
+  // The SPS must have already been set up.
+  // set the VPS profile information.
+  for (auto& olsHrdParam : vps.olsHrdParams) {
+    olsHrdParam = OlsHrdParams();
+  }
+  ProfileLevelTierFeatures profileLevelTierFeatures;
+  profileLevelTierFeatures.extractPTLInformation(sps);
+  vps.deriveOutputLayerSets();
+  vps.deriveTargetOutputLayerSet(vps.targetOlsIdx);
+
+
+  // number of the DPB parameters is set equal to the number of OLS containing multi layers
+  if (!vps.eachLayerIsAnOls)
+  {
+    vps.numDpbParams = vps.numMultiLayeredOlss;
+  }
+
+  if (vps.dpbParameters.size() != vps.numDpbParams)
+  {
+    vps.dpbParameters.resize(vps.numDpbParams);
+  }
+
+  if (vps.dpbMaxTemporalId.size() != vps.numDpbParams)
+  {
+    vps.dpbMaxTemporalId.resize(vps.numDpbParams);
+  }
+  for (int olsIdx = 0, dpbIdx = 0; olsIdx < vps.numOutputLayersInOls.size(); olsIdx++)
+  {
+    if (vps.numLayersInOls[olsIdx] > 1)
+    {
+      if (std::find(vps.layerIdInOls[olsIdx].begin(), vps.layerIdInOls[olsIdx].end(), m_layerId) != vps.layerIdInOls[olsIdx].end())
+      {
+        vps.olsDpbPicSize[olsIdx].width = std::max<int>(sps.maxPicWidthInLumaSamples, vps.olsDpbPicSize[olsIdx].width);
+        vps.olsDpbPicSize[olsIdx].height = std::max<int>(sps.maxPicHeightInLumaSamples, vps.olsDpbPicSize[olsIdx].height);
+        vps.olsDpbChromaFormatIdc[olsIdx] = std::max<int>(sps.chromaFormatIdc, vps.olsDpbChromaFormatIdc[olsIdx]);
+        vps.olsDpbBitDepthMinus8[olsIdx] = std::max<int>(sps.bitDepths[CH_L] - 8, vps.olsDpbBitDepthMinus8[olsIdx]);
+      }
+
+      vps.olsDpbParamsIdx[olsIdx] = dpbIdx;
+      dpbIdx++;
+    }
+  }
+  //for( int i = 0; i < vps.numDpbParams; i++ )
+  for (int i = 0; i < vps.numOutputLayersInOls.size(); i++)
+  {
+    if (vps.numLayersInOls[i] > 1)
+    {
+      int dpbIdx = vps.olsDpbParamsIdx[i];
+
+      if (vps.maxSubLayers == 1)
+      {
+        // When vps_max_sublayers_minus1 is equal to 0, the value of vps_dpb_max_tid[ dpbIdx ] is inferred to be equal to 0.
+        vps.dpbMaxTemporalId[dpbIdx] = 0;
+      }
+      else
+      {
+        if (vps.defaultPtlDpbHrdMaxTidFlag)
+        {
+          // When vps_max_sublayers_minus1 is greater than 0 and vps_all_layers_same_num_sublayers_flag is equal to 1, the value of vps_dpb_max_tid[ dpbIdx ] is inferred to be equal to vps_max_sublayers_minus1.
+          vps.dpbMaxTemporalId[dpbIdx] = vps.maxSubLayers - 1;
+        }
+        else
+        {
+          vps.dpbMaxTemporalId[dpbIdx] = vps.maxSubLayers - 1;
+        }
+      }
+
+      int decPicBuffering[VVENC_MAX_TLAYER] = { 0 };
+
+      for (int lIdx = 0; lIdx < vps.numLayersInOls[i]; lIdx++)
+      {
+        for (int tId = 0; tId < VVENC_MAX_TLAYER; tId++)
+        {
+          decPicBuffering[tId] += m_layerDecPicBuffering[vps.layerIdInOls[i][lIdx] * VVENC_MAX_TLAYER + tId];
+        }
+      }
+
+      for (int j = (vps.sublayerDpbParamsPresent ? 0 : vps.dpbMaxTemporalId[dpbIdx]); j <= vps.dpbMaxTemporalId[dpbIdx]; j++)
+      {
+        vps.dpbParameters[dpbIdx].maxDecPicBuffering[j] = decPicBuffering[j] > 0 ? decPicBuffering[j] : profileLevelTierFeatures.getMaxDpbSize(vps.olsDpbPicSize[i].width * vps.olsDpbPicSize[i].height);
+        vps.dpbParameters[dpbIdx].numReorderPics[j] = vps.dpbParameters[dpbIdx].maxDecPicBuffering[j] - 1;
+        vps.dpbParameters[dpbIdx].maxLatencyIncreasePlus1[j] = 0;
+
+        CHECK(vps.dpbParameters[dpbIdx].maxDecPicBuffering[j] > profileLevelTierFeatures.getMaxDpbSize(vps.olsDpbPicSize[i].width * vps.olsDpbPicSize[i].height), "DPB size is not sufficient");
+      }
+
+      for (int j = (vps.sublayerDpbParamsPresent ? vps.dpbMaxTemporalId[dpbIdx] : 0); j < vps.dpbMaxTemporalId[dpbIdx]; j++)
+      {
+        // When dpb_max_dec_pic_buffering_minus1[ dpbIdx ] is not present for dpbIdx in the range of 0 to maxSubLayersMinus1 - 1, inclusive, due to subLayerInfoFlag being equal to 0, it is inferred to be equal to dpb_max_dec_pic_buffering_minus1[ maxSubLayersMinus1 ].
+        vps.dpbParameters[dpbIdx].maxDecPicBuffering[j] = vps.dpbParameters[dpbIdx].maxDecPicBuffering[vps.dpbMaxTemporalId[dpbIdx]];
+
+        // When dpb_max_num_reorder_pics[ dpbIdx ] is not present for dpbIdx in the range of 0 to maxSubLayersMinus1 - 1, inclusive, due to subLayerInfoFlag being equal to 0, it is inferred to be equal to dpb_max_num_reorder_pics[ maxSubLayersMinus1 ].
+        vps.dpbParameters[dpbIdx].numReorderPics[j] = vps.dpbParameters[dpbIdx].numReorderPics[vps.dpbMaxTemporalId[dpbIdx]];
+
+        // When dpb_max_latency_increase_plus1[ dpbIdx ] is not present for dpbIdx in the range of 0 to maxSubLayersMinus1 - 1, inclusive, due to subLayerInfoFlag being equal to 0, it is inferred to be equal to dpb_max_latency_increase_plus1[ maxSubLayersMinus1 ].
+        vps.dpbParameters[dpbIdx].maxLatencyIncreasePlus1[j] = vps.dpbParameters[dpbIdx].maxLatencyIncreasePlus1[vps.dpbMaxTemporalId[dpbIdx]];
+      }
+    }
+  }
+  for (int i = 0; i < vps.numOutputLayerSets; i++)
+  {
+    vps.hrdMaxTid[i] = vps.maxSubLayers - 1;
+  }
+  vps.checkVPS();
+}
+#endif
 
 void EncGOP::xInitDCI(DCI &dci, const SPS &sps, const int dciId) const
 {
@@ -1030,8 +1388,14 @@ void EncGOP::xInitSPS(SPS &sps) const
   profileTierLevel->levelIdc      = m_pcEncCfg->m_level;
   profileTierLevel->tierFlag      = m_pcEncCfg->m_levelTier;
   profileTierLevel->profileIdc    = m_pcEncCfg->m_profile;
+#if ENABLE_SPATIAL_SCALABLE
+  profileTierLevel->multiLayerEnabledFlag = m_pcEncCfg->m_multiLayerEnabledFlag || m_pcEncCfg->m_maxLayers > 1;
+#endif
   profileTierLevel->subProfileIdc.clear();
   profileTierLevel->subProfileIdc.push_back( m_pcEncCfg->m_subProfile );
+#if ENABLE_SPATIAL_SCALABLE
+  sps.vpsId = m_VPS.vpsId;
+#endif
 
   sps.maxPicWidthInLumaSamples      = m_pcEncCfg->m_PadSourceWidth;
   sps.maxPicHeightInLumaSamples     = m_pcEncCfg->m_PadSourceHeight;
@@ -1055,7 +1419,11 @@ void EncGOP::xInitSPS(SPS &sps) const
   sps.IBC                           = m_pcEncCfg->m_IBCMode != 0;
   sps.maxNumIBCMergeCand            = 6;
 
+#if ENABLE_SPATIAL_SCALABLE
+  sps.idrRefParamList               = m_pcEncCfg->m_avoidIntraInDepLayer && m_pcEncCfg->m_numRefLayers[m_VPS.generalLayerIdx[m_layerId]] > 0 ? true : m_pcEncCfg->m_idrRefParamList;
+#else
   sps.idrRefParamList               = m_pcEncCfg->m_idrRefParamList;
+#endif
   sps.dualITree                     = m_pcEncCfg->m_dualITree && m_pcEncCfg->m_internChromaFormat != VVENC_CHROMA_400;
   sps.MTS                           = m_pcEncCfg->m_MTS || m_pcEncCfg->m_MTSImplicit;
   sps.SMVD                          = m_pcEncCfg->m_SMVD;
@@ -1153,6 +1521,10 @@ void EncGOP::xInitSPS(SPS &sps) const
   sps.chromaQpMappingTable.m_numQpTables = (m_pcEncCfg->m_chromaQpMappingTableParams.m_sameCQPTableForAllChromaFlag ? 1 : (sps.jointCbCr ? 3 : 2));
   sps.chromaQpMappingTable.setParams(m_pcEncCfg->m_chromaQpMappingTableParams, sps.qpBDOffset[ CH_C ]);
   sps.chromaQpMappingTable.derivedChromaQPMappingTables();
+#if ENABLE_SPATIAL_SCALABLE
+  sps.interLayerPresent = m_layerId > 0 && m_VPS.maxLayers > 1 && !m_VPS.allIndependentLayers && !m_VPS.independentLayer[m_VPS.generalLayerIdx[m_layerId]];
+  CHECK(m_VPS.independentLayer[m_VPS.generalLayerIdx[m_layerId]] && sps.interLayerPresent, " When vps_independent_layer_flag[GeneralLayerIdx[nuh_layer_id ]]  is equal to 1, the value of inter_layer_ref_pics_present_flag shall be equal to 0.");
+#endif
 }
 
 void EncGOP::xInitPPS(PPS &pps, const SPS &sps) const
@@ -1369,6 +1741,12 @@ void EncGOP::xInitRPL(SPS &sps) const
       rpl.numberOfShorttermPictures = ge.m_numRefPics;
       rpl.numberOfLongtermPictures = 0;   //Hardcoded as 0 for now. need to update this when implementing LTRP
       rpl.numberOfActivePictures = ge.m_numRefPicsActive;
+#if ENABLE_SPATIAL_SCALABLE
+      rpl.ltrpInSliceHeader = ge.m_ltrp_in_slice_header_flag;
+      rpl.interLayerPresent = sps.interLayerPresent;
+      // inter-layer reference picture is not signaled in SPS RPL, SPS is shared currently
+      rpl.numberOfInterLayerPictures = 0;
+#endif
 
       for (int k = 0; k < ge.m_numRefPics; k++)
       {
@@ -1545,7 +1923,11 @@ bool EncGOP::xIsSliceTemporalSwitchingPoint( const Slice* slice, const PicList& 
       const vvencRPLEntry* rplList1 = m_pcEncCfg->m_RPLList1;
       bool isSTSA              = true;
 
+#if ENABLE_SPATIAL_SCALABLE
+      for (int ii = 0; ii < m_pcEncCfg->m_GOPSize && isSTSA == true; ii++)
+#else
       for( int ii = gopId + 1; ii < m_pcEncCfg->m_GOPSize && isSTSA == true; ii++ )
+#endif
       {
         int lTid = rplList0[ ii ].m_temporalId;
 
@@ -1554,7 +1936,11 @@ bool EncGOP::xIsSliceTemporalSwitchingPoint( const Slice* slice, const PicList& 
           const ReferencePictureList* rpl0 = &slice->sps->rplList[0][ii];
           for ( int jj = 0; jj < slice->rpl[0]->numberOfActivePictures; jj++ )
           {
+#if ENABLE_SPATIAL_SCALABLE
+            int tPoc = slice->poc + rpl0->refPicIdentifier[jj];
+#else
             int tPoc = rplList0[ ii ].m_POC + rpl0->refPicIdentifier[ jj ];
+#endif
             int kk   = 0;
             for ( kk = 0; kk < m_pcEncCfg->m_GOPSize; kk++ )
             {
@@ -1573,7 +1959,11 @@ bool EncGOP::xIsSliceTemporalSwitchingPoint( const Slice* slice, const PicList& 
           const ReferencePictureList* rpl1 = &slice->sps->rplList[1][ii];
           for ( int jj = 0; jj < slice->rpl[1]->numberOfActivePictures; jj++ )
           {
+#if ENABLE_SPATIAL_SCALABLE
+            int tPoc = slice->poc + rpl1->refPicIdentifier[jj];
+#else
             int tPoc = rplList1[ ii ].m_POC + rpl1->refPicIdentifier[ jj ];
+#endif
             int kk   = 0;
             for ( kk = 0; kk < m_pcEncCfg->m_GOPSize; kk++ )
             {
@@ -1697,7 +2087,12 @@ void EncGOP::xInitFirstSlice( Picture& pic, const PicList& picList, bool isEncod
   pic.cs->picHeader     = new PicHeader;
   const SPS& sps        = *(slice->sps);
   const int drtIPoffset = m_pcEncCfg->m_DecodingRefreshType == 4 ? 1 + (m_pcEncCfg->m_IntraPeriod - m_pcEncCfg->m_GOPSize) : 0;
+#if ENABLE_SPATIAL_SCALABLE
+  const bool useIlRef = m_pcEncCfg->m_avoidIntraInDepLayer && pic.cs->vps && m_pcEncCfg->m_numRefLayers[pic.cs->vps->generalLayerIdx[m_layerId]];
+  SliceType sliceType   = ( (curPoc+drtIPoffset) % (unsigned)m_pcEncCfg->m_IntraPeriod == 0 || m_pcEncCfg->m_GOPList[ gopId ].m_sliceType== 'I' || ( m_pcEncCfg->m_DecodingRefreshType == 4 && m_bFirstInit ) ) && ( !useIlRef ) ? ( VVENC_I_SLICE ) : ( m_pcEncCfg->m_GOPList[ gopId ].m_sliceType== 'P' ? VVENC_P_SLICE : VVENC_B_SLICE );
+#else
   SliceType sliceType   = ( (curPoc+drtIPoffset) % (unsigned)m_pcEncCfg->m_IntraPeriod == 0 || m_pcEncCfg->m_GOPList[ gopId ].m_sliceType== 'I' || ( m_pcEncCfg->m_DecodingRefreshType == 4 && m_bFirstInit ) ) ? ( VVENC_I_SLICE ) : ( m_pcEncCfg->m_GOPList[ gopId ].m_sliceType== 'P' ? VVENC_P_SLICE : VVENC_B_SLICE );
+#endif
   vvencNalUnitType naluType  = xGetNalUnitType( curPoc, m_lastIDR );
 
   if( curPoc == 0 && m_pcEncCfg->m_DecodingRefreshType == 4 && !m_bFirstInit )
@@ -1731,6 +2126,9 @@ void EncGOP::xInitFirstSlice( Picture& pic, const PicList& picList, bool isEncod
   slice->nalUnitType               = naluType;
   slice->depth                     = depth;
   slice->lastIDR                   = m_lastIDR;
+#if ENABLE_SPATIAL_SCALABLE
+  slice->nuhLayerId                = m_layerId;
+#endif
 
   slice->depQuantEnabled           = m_pcEncCfg->m_DepQuantEnabled;
   slice->signDataHidingEnabled     = m_pcEncCfg->m_SignDataHidingEnabled;
@@ -1756,11 +2154,25 @@ void EncGOP::xInitFirstSlice( Picture& pic, const PicList& picList, bool isEncod
   // reference list
   int poc;
   xSelectReferencePictureList( slice, curPoc, gopId, -1 );
+#if ENABLE_SPATIAL_SCALABLE
+  const int cond = m_pcEncCfg->m_maxLayers > 1 ? 0 : -2; // For single layer encoding, set the condition -2 to maintain compatibility with the original VVenC.
+  if (slice->checkThatAllRefPicsAreAvailable(picList, slice->rpl[0], 0, poc) != cond || slice->checkThatAllRefPicsAreAvailable(picList, slice->rpl[1], 1, poc) != cond
+    || ((m_pcEncCfg->m_avoidIntraInDepLayer || !slice->isIRAP()) && slice->pic->cs->vps && m_pcEncCfg->m_numRefLayers[slice->pic->cs->vps->generalLayerIdx[m_layerId]])
+    )
+  {
+    slice->createExplicitReferencePictureSetFromReference( picList, slice->rpl[0], slice->rpl[1], *m_pcEncCfg );
+#else
   if ( slice->checkThatAllRefPicsAreAvailable( picList, slice->rpl[0], 0, poc ) != -2 || slice->checkThatAllRefPicsAreAvailable( picList, slice->rpl[1], 1, poc ) != -2 )
   {
     slice->createExplicitReferencePictureSetFromReference( picList, slice->rpl[0], slice->rpl[1] );
+#endif
   }
+#if ENABLE_SPATIAL_SCALABLE
+  slice->applyReferencePictureListBasedMarking(picList, slice->rpl[0], slice->rpl[1], m_layerId, *slice->pps);
+#else
   slice->applyReferencePictureListBasedMarking( picList, slice->rpl[0], slice->rpl[1], 0, *slice->pps );
+#endif
+
 
   // nalu type refinement
   if ( xIsSliceTemporalSwitchingPoint( slice, picList, gopId ) )
@@ -1843,6 +2255,85 @@ void EncGOP::xInitFirstSlice( Picture& pic, const PicList& picList, bool isEncod
   xInitSliceTMVPFlag ( pic.cs->picHeader, slice, gopId );
   xInitSliceMvdL1Zero( pic.cs->picHeader, slice );
   slice->picHeader->maxNumAffineMergeCand = sps.Affine ? sps.maxNumAffineMergeCand : ( sps.SbtMvp && slice->picHeader->enableTMVP ? 1 : 0 );
+
+#if ENABLE_SPATIAL_SCALABLE
+  if (slice->sliceType != VVENC_I_SLICE && slice->picHeader->enableTMVP)
+  {
+    int colRefIdxL0 = -1, colRefIdxL1 = -1;
+
+    for (int refIdx = 0; refIdx < slice->numRefIdx[REF_PIC_LIST_0]; refIdx++)
+    {
+      CHECK(slice->refPicList[REF_PIC_LIST_0][refIdx]->unscaledPic == nullptr, "unscaledPic is not set for L0 reference picture");
+
+      if (slice->refPicList[REF_PIC_LIST_0][refIdx]->isRefScaled(slice->pps) == false)
+      {
+        colRefIdxL0 = refIdx;
+        break;
+      }
+    }
+
+    if (slice->sliceType == VVENC_B_SLICE)
+    {
+      for (int refIdx = 0; refIdx < slice->numRefIdx[REF_PIC_LIST_1]; refIdx++)
+      {
+        CHECK(slice->refPicList[REF_PIC_LIST_1][refIdx]->unscaledPic == nullptr, "unscaledPic is not set for L1 reference picture");
+
+        if (slice->refPicList[REF_PIC_LIST_1][refIdx]->isRefScaled(slice->pps) == false)
+        {
+          colRefIdxL1 = refIdx;
+          break;
+        }
+      }
+    }
+
+    if (colRefIdxL0 >= 0 && colRefIdxL1 >= 0)
+    {
+      const Picture* refPicL0 = slice->refPicList[REF_PIC_LIST_0][colRefIdxL0];
+      if (!refPicL0->slices.size())
+      {
+        refPicL0 = refPicL0->unscaledPic;
+      }
+
+      const Picture* refPicL1 = slice->refPicList[REF_PIC_LIST_1][colRefIdxL1];
+      if (!refPicL1->slices.size())
+      {
+        refPicL1 = refPicL1->unscaledPic;
+      }
+
+      CHECK(!refPicL0->slices.size(), "Wrong L0 reference picture");
+      CHECK(!refPicL1->slices.size(), "Wrong L1 reference picture");
+
+      const uint32_t uiColFromL0 = refPicL0->slices[0]->sliceQp > refPicL1->slices[0]->sliceQp;
+      slice->picHeader->picColFromL0 = uiColFromL0;
+      slice->colFromL0Flag = uiColFromL0;
+      slice->colRefIdx = uiColFromL0 ? colRefIdxL0 : colRefIdxL1;
+      slice->picHeader->colRefIdx = uiColFromL0 ? colRefIdxL0 : colRefIdxL1;
+    }
+    else if (colRefIdxL0 < 0 && colRefIdxL1 >= 0)
+    {
+      slice->picHeader->picColFromL0 = false;
+      slice->colFromL0Flag = false;
+      slice->colRefIdx = colRefIdxL1;
+      slice->picHeader->colRefIdx = colRefIdxL1;
+    }
+    else if (colRefIdxL0 >= 0 && colRefIdxL1 < 0)
+    {
+      slice->picHeader->picColFromL0 = true;
+      slice->colFromL0Flag = true;
+      slice->colRefIdx = colRefIdxL0;
+      slice->picHeader->colRefIdx = colRefIdxL0;
+    }
+    else
+    {
+      slice->picHeader->enableTMVP = 0;
+    }
+  }
+
+  PicHeader* picHeader = new PicHeader();
+  *picHeader = *pic.cs->picHeader;
+  slice->scaleRefPicList(m_scaledRefPic, picHeader, nullptr, nullptr, pic.cs->picHeader->scalingListAps, false);
+  delete picHeader;
+#endif
 
   if( slice->nalUnitType == VVENC_NAL_UNIT_CODED_SLICE_RASL && m_pcEncCfg->m_rprRASLtoolSwitch )
   {
@@ -2053,7 +2544,16 @@ void EncGOP::xInitSliceMvdL1Zero( PicHeader* picHeader, const Slice* slice )
 void EncGOP::xInitLMCS( Picture& pic )
 {
   Slice* slice = pic.cs->slice;
+#if ENABLE_SPATIAL_SCALABLE
+  SliceType condSliceType = slice->sliceType;
+  if (condSliceType != VVENC_I_SLICE && slice->nuhLayerId > 0 && (slice->nalUnitType >= VVENC_NAL_UNIT_CODED_SLICE_IDR_W_RADL && slice->nalUnitType <= VVENC_NAL_UNIT_CODED_SLICE_CRA))
+  {
+    condSliceType = VVENC_I_SLICE;
+  }
+  const SliceType sliceType = condSliceType;
+#else
   const SliceType sliceType = slice->sliceType;
+#endif
 
   if( ! pic.useScLMCS || (!slice->isIntra() && m_disableLMCSIP) )
   {
@@ -2123,6 +2623,12 @@ void EncGOP::xInitLMCS( Picture& pic )
     }
 
     m_Reshaper.setCTUFlag( false );
+#if ENABLE_SPATIAL_SCALABLE
+    if (slice->sliceType != condSliceType)
+    {
+      m_Reshaper.setCTUFlag(true);
+    }
+#endif
   }
   else
   {
@@ -2155,7 +2661,11 @@ void EncGOP::xInitLMCS( Picture& pic )
   if ( m_Reshaper.getSliceReshaperInfo().sliceReshaperModelPresent )
   {
     ParameterSetMap<APS>& picApsMap = pic.picApsMap;
+#if ENABLE_SPATIAL_SCALABLE
+    const int apsId0 = std::min<int>(3, pic.vps == nullptr ? 0 : pic.vps->generalLayerIdx[m_layerId]);
+#else
     const int apsId0                = 0;
+#endif
     const int apsMapIdx             = ( apsId0 << NUM_APS_TYPE_LEN ) + LMCS_APS;
     APS* picAps                     = picApsMap.getPS( apsMapIdx );
     if ( picAps == nullptr )
@@ -2172,7 +2682,11 @@ void EncGOP::xInitLMCS( Picture& pic )
 
   if ( slice->picHeader->lmcsEnabled )
   {
+#if ENABLE_SPATIAL_SCALABLE
+    slice->picHeader->lmcsApsId = std::min<int>(3, pic.vps == nullptr ? 0 : pic.vps->generalLayerIdx[m_layerId]);
+#else
     slice->picHeader->lmcsApsId = 0;
+#endif
   }
 
   pic.reshapeData.copyReshapeData( m_Reshaper );
@@ -2310,6 +2824,32 @@ int EncGOP::xWriteParameterSets( Picture& pic, AccessUnitList& accessUnit, HLSWr
   const PPS& pps      = *(slice->pps);
   int actualTotalBits = 0;
 
+#if ENABLE_SPATIAL_SCALABLE
+  int layerIdx = slice->vps->generalLayerIdx[slice->nuhLayerId];
+
+  bool IrapOrGdrAu = slice->picHeader->gdrPic || (slice->isIRAP() && !slice->pps->mixedNaluTypesInPic);
+  if (((slice->vps->maxLayers > 1 && IrapOrGdrAu) || m_pcEncCfg->m_AccessUnitDelimiter) && !layerIdx)
+  {
+    xWriteAccessUnitDelimiter(accessUnit, slice, IrapOrGdrAu, hlsWriter);
+  }
+
+  if (m_bFirstWrite || (m_pcEncCfg->m_rewriteParamSets && slice->isIRAP()))
+  {
+    const int layerIdx = pic.vps->generalLayerIdx[m_layerId];
+    if (layerIdx == 0) {
+      actualTotalBits += xWriteDCI(accessUnit, pic.dci, hlsWriter);
+      if (slice->sps->vpsId != 0)
+      {
+        actualTotalBits += xWriteVPS(accessUnit, pic.vps, hlsWriter);
+      }
+    }
+    if (m_pcEncCfg->m_rewriteParamSets && slice->isIRAP()) {
+      actualTotalBits += xWriteSPS(accessUnit, &sps, hlsWriter);
+      actualTotalBits += xWritePPS(accessUnit, &pps, &sps, hlsWriter);
+    }
+    m_bFirstWrite = false;
+  }
+#else
   if ( m_bFirstWrite || ( m_pcEncCfg->m_rewriteParamSets && slice->isIRAP() ) )
   {
     if (slice->sps->vpsId != 0)
@@ -2327,6 +2867,7 @@ int EncGOP::xWriteParameterSets( Picture& pic, AccessUnitList& accessUnit, HLSWr
   {
     xWriteAccessUnitDelimiter( accessUnit, slice, IrapOrGdrAu, hlsWriter );
   }
+#endif
 
   // send LMCS APS when LMCSModel is updated. It can be updated even current slice does not enable reshaper.
   // For example, in RA, update is on intra slice, but intra slice may not use reshaper
@@ -2342,6 +2883,9 @@ int EncGOP::xWriteParameterSets( Picture& pic, AccessUnitList& accessUnit, HLSWr
     {
       aps->chromaPresent = slice->sps->chromaFormatIdc != CHROMA_400;
       aps->temporalId = slice->TLayer;
+#if ENABLE_SPATIAL_SCALABLE
+      aps->layerId = slice->nuhLayerId;
+#endif
       actualTotalBits += xWriteAPS( accessUnit, aps, hlsWriter, VVENC_NAL_UNIT_PREFIX_APS );
       apsMap.clearChangedFlag( apsMapIdx );
       CHECK( aps != slice->picHeader->lmcsAps, "Wrong LMCS APS pointer" );
@@ -2378,6 +2922,9 @@ int EncGOP::xWriteParameterSets( Picture& pic, AccessUnitList& accessUnit, HLSWr
       {
         aps->chromaPresent = slice->sps->chromaFormatIdc != CHROMA_400;
         aps->temporalId = slice->TLayer;
+#if ENABLE_SPATIAL_SCALABLE
+        aps->layerId = slice->nuhLayerId;
+#endif
         actualTotalBits += xWriteAPS( accessUnit, aps, hlsWriter, VVENC_NAL_UNIT_PREFIX_APS );
         apsMap.clearChangedFlag( apsMapIdx );
       }
@@ -2403,7 +2950,11 @@ int EncGOP::xWritePictureSlices( Picture& pic, AccessUnitList& accessUnit, HLSWr
     }
 
     // start slice NALUnit
+#if ENABLE_SPATIAL_SCALABLE
+    OutputNALUnit nalu( slice->nalUnitType, m_layerId, slice->TLayer );
+#else
     OutputNALUnit nalu( slice->nalUnitType, slice->TLayer );
+#endif
     hlsWriter.setBitstream( &nalu.m_Bitstream );
 
     // slice header and data
@@ -2534,7 +3085,11 @@ int EncGOP::xWriteDCI ( AccessUnitList &accessUnit, const DCI *dci, HLSWriter& h
 
 int EncGOP::xWriteSPS ( AccessUnitList &accessUnit, const SPS *sps, HLSWriter& hlsWriter )
 {
+#if ENABLE_SPATIAL_SCALABLE
+  OutputNALUnit nalu(VVENC_NAL_UNIT_SPS, m_layerId);
+#else
   OutputNALUnit nalu(VVENC_NAL_UNIT_SPS);
+#endif
   hlsWriter.setBitstream( &nalu.m_Bitstream );
   hlsWriter.codeSPS( sps );
   accessUnit.push_back(new NALUnitEBSP(nalu));
@@ -2543,7 +3098,11 @@ int EncGOP::xWriteSPS ( AccessUnitList &accessUnit, const SPS *sps, HLSWriter& h
 
 int EncGOP::xWritePPS ( AccessUnitList &accessUnit, const PPS *pps, const SPS *sps, HLSWriter& hlsWriter )
 {
+#if ENABLE_SPATIAL_SCALABLE
+  OutputNALUnit nalu(VVENC_NAL_UNIT_PPS, m_layerId);
+#else
   OutputNALUnit nalu(VVENC_NAL_UNIT_PPS);
+#endif
   hlsWriter.setBitstream( &nalu.m_Bitstream );
   hlsWriter.codePPS( pps, sps );
   accessUnit.push_back(new NALUnitEBSP(nalu));
@@ -2552,7 +3111,11 @@ int EncGOP::xWritePPS ( AccessUnitList &accessUnit, const PPS *pps, const SPS *s
 
 int EncGOP::xWriteAPS( AccessUnitList &accessUnit, const APS *aps, HLSWriter& hlsWriter, vvencNalUnitType eNalUnitType )
 {
+#if ENABLE_SPATIAL_SCALABLE
+  OutputNALUnit nalu(eNalUnitType, m_layerId, aps->temporalId);
+#else
   OutputNALUnit nalu(eNalUnitType, aps->temporalId);
+#endif
   hlsWriter.setBitstream(&nalu.m_Bitstream);
   hlsWriter.codeAPS(aps);
   accessUnit.push_back(new NALUnitEBSP(nalu));
@@ -2561,7 +3124,11 @@ int EncGOP::xWriteAPS( AccessUnitList &accessUnit, const APS *aps, HLSWriter& hl
 
 void EncGOP::xWriteAccessUnitDelimiter ( AccessUnitList &accessUnit, Slice* slice, bool IrapOrGdr, HLSWriter& hlsWriter )
 {
+#if ENABLE_SPATIAL_SCALABLE
+  OutputNALUnit nalu(VVENC_NAL_UNIT_ACCESS_UNIT_DELIMITER, m_layerId, slice->TLayer);
+#else
   OutputNALUnit nalu(VVENC_NAL_UNIT_ACCESS_UNIT_DELIMITER, slice->TLayer);
+#endif
   hlsWriter.setBitstream(&nalu.m_Bitstream);
   hlsWriter.codeAUD( IrapOrGdr, 2-slice->sliceType );
   accessUnit.push_front(new NALUnitEBSP(nalu));
@@ -2573,7 +3140,11 @@ void EncGOP::xWriteSEI (vvencNalUnitType naluType, SEIMessages& seiMessages, Acc
   {
     return;
   }
+#if ENABLE_SPATIAL_SCALABLE
+  OutputNALUnit nalu(naluType, m_layerId, temporalId);
+#else
   OutputNALUnit nalu(naluType, temporalId);
+#endif
   m_seiWriter.writeSEImessages(nalu.m_Bitstream, seiMessages, m_EncHRD, false, temporalId);
   auPos = accessUnit.insert(auPos, new NALUnitEBSP(nalu));
   auPos++;
@@ -2589,7 +3160,11 @@ void EncGOP::xWriteSEISeparately (vvencNalUnitType naluType, SEIMessages& seiMes
   {
     SEIMessages tmpMessages;
     tmpMessages.push_back(*sei);
+#if ENABLE_SPATIAL_SCALABLE
+    OutputNALUnit nalu(naluType, m_layerId, temporalId);
+#else
     OutputNALUnit nalu(naluType, temporalId);
+#endif
     m_seiWriter.writeSEImessages(nalu.m_Bitstream, tmpMessages, m_EncHRD, false, temporalId);
     auPos = accessUnit.insert(auPos, new NALUnitEBSP(nalu));
     auPos++;
@@ -2729,7 +3304,11 @@ void EncGOP::xCalculateAddPSNR( const Picture* pic, CPelUnitBuf cPicD, AccessUni
                                   pic->picVisActY,
                                   uibits,
                                   dPSNR[COMP_Y],
+#if ENABLE_SPATIAL_SCALABLE
+                                  slice->isIRAP(),
+#else
                                   slice->isIntra(),
+#endif
                                   slice->TLayer );
   }
 
@@ -2785,8 +3364,15 @@ void EncGOP::xCalculateAddPSNR( const Picture* pic, CPelUnitBuf cPicD, AccessUni
     }
     else
     {
+#if ENABLE_SPATIAL_SCALABLE
+      std::string cInfo = prnt("POC %4d LId: %2d TId: %1d (%10s, %c-SLICE, QP %d ) %10d bits",
+#else
       std::string cInfo = prnt("POC %4d TId: %1d (%10s, %c-SLICE, QP %d ) %10d bits",
+#endif
           slice->poc,
+#if ENABLE_SPATIAL_SCALABLE
+          slice->pic->layerId,
+#endif
           slice->TLayer,
           nalUnitTypeToString( slice->nalUnitType ),
           c,
@@ -2825,11 +3411,47 @@ void EncGOP::xCalculateAddPSNR( const Picture* pic, CPelUnitBuf cPicD, AccessUni
       std::string cRefPics;
       for( int iRefList = 0; iRefList < 2; iRefList++ )
       {
+#if ENABLE_SPATIAL_SCALABLE
+        std::string tmp = prnt(" [L%d", iRefList);
+#else
         std::string tmp = prnt(" [L%d ", iRefList);
+#endif
         cRefPics.append( tmp );
         for( int iRefIndex = 0; iRefIndex < slice->numRefIdx[ iRefList ]; iRefIndex++ )
         {
+#if ENABLE_SPATIAL_SCALABLE
+          const std::pair<int, int>& scaleRatio = slice->getScalingRatio(RefPicList(iRefList), iRefIndex);
+
+          if (pic->cs->picHeader->enableTMVP && slice->colFromL0Flag == bool(1 - iRefList) && slice->colRefIdx == iRefIndex)
+          {
+            if (scaleRatio.first != 1 << SCALE_RATIO_BITS || scaleRatio.second != 1 << SCALE_RATIO_BITS)
+            {
+              tmp = prnt(" %dc(%1.2lfx, %1.2lfx)", slice->getRefPOC(RefPicList(iRefList), iRefIndex), double(scaleRatio.first) / (1 << SCALE_RATIO_BITS), double(scaleRatio.second) / (1 << SCALE_RATIO_BITS));
+            }
+            else
+            {
+              tmp = prnt(" %dc", slice->getRefPOC(RefPicList(iRefList), iRefIndex));
+            }
+          }
+          else
+          {
+            if (scaleRatio.first != 1 << SCALE_RATIO_BITS || scaleRatio.second != 1 << SCALE_RATIO_BITS)
+            {
+              tmp = prnt(" %d(%1.2lfx, %1.2lfx)", slice->getRefPOC(RefPicList(iRefList), iRefIndex), double(scaleRatio.first) / (1 << SCALE_RATIO_BITS), double(scaleRatio.second) / (1 << SCALE_RATIO_BITS));
+            }
+            else
+            {
+              tmp = prnt(" %d", slice->getRefPOC(RefPicList(iRefList), iRefIndex));
+            }
+          }
+
+          if (slice->getRefPOC(RefPicList(iRefList), iRefIndex) == slice->poc)
+          {
+            tmp += prnt(".%d", slice->getRefPic(RefPicList(iRefList), iRefIndex)->layerId);
+          }
+#else
           tmp = prnt("%d ", slice->getRefPOC( RefPicList( iRefList ), iRefIndex));
+#endif
           cRefPics.append( tmp );
         }
         cRefPics.append( "]" );

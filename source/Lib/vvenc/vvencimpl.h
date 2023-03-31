@@ -91,7 +91,11 @@ public:
   VVEncImpl();
   virtual ~VVEncImpl();
 
+#if ENABLE_SPATIAL_SCALABLE
+  int init( vvenc_config* config, EncLibCommon& encLibCommon, int layerId );
+#else
   int init( vvenc_config* config );
+#endif
 
   int initPass( int pass, const char* statsFName );
   int uninit();
@@ -100,6 +104,9 @@ public:
 
   int setRecYUVBufferCallback( void *, vvencRecYUVBufferCallback );
 
+#if ENABLE_SPATIAL_SCALABLE
+  int checkChromaFormatAndBitDepth(const std::vector<vvencEncoder*>& encs);   ///< check chroma format and bit-depth for dependent layers
+#endif
   int encode( vvencYUVBuffer* pcYUVBuffer, vvencAccessUnit* pcAccessUnit, bool* pbEncodeDone );
 
   int getParameterSets( vvencAccessUnit *pcAccessUnit );

@@ -77,6 +77,9 @@ VVENC_NAMESPACE_BEGIN
 /* vvencEncoder:
  * opaque handler for the decoder */
 typedef struct vvencEncoder vvencEncoder;
+#if ENABLE_SPATIAL_SCALABLE
+typedef struct vvencEncLibCommon vvencEncLibCommon;
+#endif
 
 /* vvdecLoggingCallback:
    callback function to receive messages of the encoder library
@@ -226,6 +229,44 @@ VVENC_DECL void vvenc_accessUnit_default(vvencAccessUnit *accessUnit );
 */
 VVENC_DECL const char* vvenc_get_version( void );
 
+#if ENABLE_SPATIAL_SCALABLE
+/* vvenc_enclibcommon_create
+  This method creates a vvenc EncLibCommon instance.
+  \param[in]  none.
+  \retval     vvencEncLibCommon pointer of the EncLibCommon handler if successful, otherwise NULL
+  \pre        The EncLibCommon must not be initialized (pointer of EncLibCommon handler must be null).
+*/
+VVENC_DECL vvencEncLibCommon* vvenc_enclibcommon_create( void );
+
+/* vvenc_enclibcommon_close
+ This method resets the enclibcommon instance.
+ This method clears the enclibcommon and releases all internally allocated memory.
+ Calling uninit cancels all pending encoding calls. In order to finish pending input pictures use the flush method.
+ \param[in]  vvencEncLibCommon pointer to opaque handler.
+ \retval     int if non-zero an error occurred (see ErrorCodes), otherwise VVENC_OK indicates success.
+ \pre        None
+*/
+VVENC_DECL int vvenc_enclibcommon_close(vvencEncLibCommon *);
+
+/* vvenc_enclibcommon_reset
+ This method resets the enclibcommon instance.
+ \param[in]  vvencEncLibCommon pointer to opaque handler.
+ \retval     int if non-zero an error occurred (see ErrorCodes), otherwise VVENC_OK indicates success.
+ \pre        None
+*/
+VVENC_DECL int vvenc_enclibcommon_reset(vvencEncLibCommon*);
+
+/* vvenc_encoder_check
+ This method check chroma format and bit-depth for dependent layers.
+ \param[in]  vvencEncoder pointer to opaque handler. The enc1 will be checked.
+ \param[in]  vector of vvencEncoder pointer to opaque handler. VPS obtained from encs[0] is referenced.
+ \retval     int if non-zero an error occurred (see ErrorCodes), otherwise VVENC_OK indicates success.
+ \pre        None
+*/
+VVENC_DECL int vvenc_encoder_check(vvencEncoder*, const void* encs);
+
+#endif
+
 /* vvenc_encoder_create
   This method creates a vvenc encoder instance.
   \param[in]  none.
@@ -234,6 +275,22 @@ VVENC_DECL const char* vvenc_get_version( void );
 */
 VVENC_DECL vvencEncoder* vvenc_encoder_create( void );
 
+#if ENABLE_SPATIAL_SCALABLE
+/* vvenc_encoder_open
+  This method initializes the encoder instance.
+  This method is used to initially set up the encoder with the assigned encoder parameter struct.
+  The method fails if the encoder is already initialized or if the assigned parameter struct
+  does not pass the consistency check. Other possibilities for an unsuccessful call are missing encoder license, or an machine with
+  insufficient CPU-capabilities.
+  \param[in]  vvencEncoder pointer to opaque handler.
+  \param[in]  vvenc_config* pointer to vvenc_config struct that holds initial encoder parameters.
+  \param[in]  vvencEncLibCommon* pointer to EncCommonLib struct that holds common encoder parameters.
+  \param[in]  layerId
+  \retval     int  if non-zero an error occurred (see ErrorCodes), otherwise the return value indicates success VVENC_OK
+  \pre        The encoder must not be initialized.
+*/
+VVENC_DECL int vvenc_encoder_open( vvencEncoder*, vvenc_config*, vvencEncLibCommon*, int layerId );
+#else
 /* vvenc_encoder_open
   This method initializes the encoder instance.
   This method is used to initially set up the encoder with the assigned encoder parameter struct.
@@ -246,6 +303,7 @@ VVENC_DECL vvencEncoder* vvenc_encoder_create( void );
   \pre        The encoder must not be initialized.
 */
 VVENC_DECL int vvenc_encoder_open( vvencEncoder*, vvenc_config* );
+#endif
 
 /* vvenc_encoder_close
  This method resets the encoder instance.
@@ -296,7 +354,11 @@ VVENC_DECL int vvenc_init_pass( vvencEncoder *, int pass, const char * statsFNam
   \retval     int if non-zero an error occurred, otherwise the retval indicates success VVENC_OK
   \pre        The encoder has to be initialized successfully.
 */
+#if ENABLE_MULTILAYER_QPA
+VVENC_DECL int vvenc_encode( vvencEncoder *, vvencYUVBuffer* YUVBuffer, vvencYUVBuffer* saliencyBuffer, vvencAccessUnit* accessUnit, bool* encodeDone );
+#else
 VVENC_DECL int vvenc_encode( vvencEncoder *, vvencYUVBuffer* YUVBuffer, vvencAccessUnit* accessUnit, bool* encodeDone );
+#endif
 
 /* vvenc_get_config
  This method fetches the current encoder configuration.

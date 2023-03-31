@@ -348,6 +348,9 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   c->m_profile                                 = vvencProfile::VVENC_PROFILE_AUTO;
   c->m_levelTier                               = vvencTier::VVENC_TIER_MAIN ;
   c->m_level                                   = vvencLevel::VVENC_LEVEL_AUTO;
+#if ENABLE_SPATIAL_SCALABLE
+  c->m_multiLayerEnabledFlag                   = 0;
+#endif
 
   c->m_IntraPeriod                             = 0;             ///< period of I-slice (random access period)
   c->m_IntraPeriodSec                          = 1;             ///< period of I-slice in seconds (random access period)
@@ -679,6 +682,26 @@ VVENC_DECL void vvenc_config_default(vvenc_config *c )
   memset( c->m_reservedFlag, 0, sizeof(c->m_reservedFlag) );
   memset( c->m_reservedDouble, 0, sizeof(c->m_reservedDouble) );
 
+#if ENABLE_SPATIAL_SCALABLE
+  c->m_maxLayers = 1;
+  c->m_maxSublayers = 7;
+  c->m_defaultPtlDpbHrdMaxTidFlag = true;
+  c->m_allIndependentLayersFlag = true;
+  memset(c->m_predDirectionArray, 0, VVENC_MAX_STRING_LEN);
+  memset(c->m_layerId, 0, sizeof(c->m_layerId));
+  memset(c->m_numRefLayers, 0, sizeof(c->m_numRefLayers));
+  for (auto& str : c->m_refLayerIdxStr) { memset(str, 0, VVENC_MAX_STRING_LEN); }
+  c->m_eachLayerIsAnOlsFlag = true;
+  c->m_olsModeIdc = 0;
+  c->m_numOutputLayerSets = 1;
+  for (auto& str : c->m_olsOutputLayerStr) { memset(str, 0, VVENC_MAX_STRING_LEN); }
+  c->m_numPtlsInVps = 1;
+  c->m_avoidIntraInDepLayer = true;
+  for (auto& str : c->m_maxTidILRefPicsPlus1Str) { memset(str, 0, VVENC_MAX_STRING_LEN); }
+  for (auto& level : c->m_levelPtl) { level = VVENC_LEVEL_AUTO; }
+  memset(c->m_olsPtlIdx, 0, sizeof(c->m_olsPtlIdx));
+#endif
+
   // init default preset
   vvenc_init_preset( c, vvencPresetMode::VVENC_MEDIUM );
 }
@@ -766,16 +789,39 @@ VVENC_DECL bool vvenc_init_config_parameter( vvenc_config *c )
 
     if (c->m_internChromaFormat==vvencChromaFormat::VVENC_CHROMA_400 || c->m_internChromaFormat==vvencChromaFormat::VVENC_CHROMA_420)
     {
+#if ENABLE_SPATIAL_SCALABLE
+      if (c->m_level == VVENC_LEVEL15_5 && c->m_framesToBeEncoded == 1)
+      {
+        c->m_profile = c->m_maxLayers > 1 ? VVENC_MULTILAYER_MAIN_10_STILL_PICTURE : VVENC_MAIN_10_STILL_PICTURE;
+      }
+      else
+      {
+        c->m_profile = c->m_maxLayers > 1 ? VVENC_MULTILAYER_MAIN_10 : VVENC_MAIN_10;
+      }
+#else
       if (maxBitDepth<=10)
       {
         c->m_profile=vvencProfile::VVENC_MAIN_10;
       }
+#endif
     }
     else if (c->m_internChromaFormat==vvencChromaFormat::VVENC_CHROMA_422 || c->m_internChromaFormat==vvencChromaFormat::VVENC_CHROMA_444)
     {
       if (maxBitDepth<=10)
       {
+#if ENABLE_SPATIAL_SCALABLE
+        if (c->m_level == VVENC_LEVEL15_5 && c->m_framesToBeEncoded == 1)
+        {
+          c->m_profile =
+            c->m_maxLayers > 1 ? VVENC_MULTILAYER_MAIN_10_444_STILL_PICTURE : VVENC_MAIN_10_444_STILL_PICTURE;
+        }
+        else
+        {
+          c->m_profile = c->m_maxLayers > 1 ? VVENC_MULTILAYER_MAIN_10_444 : VVENC_MAIN_10_444;
+        }
+#else
         c->m_profile=vvencProfile::VVENC_MAIN_10_444;
+#endif
       }
     }
   }
@@ -2394,6 +2440,10 @@ static bool checkCfgParameter( vvenc_config *c )
     vvenc_confirmParameter(c, c->m_cabacInitPresent,      "Frame parallel processing: CabacInitPresent is not supported (must be disabled)" );
     vvenc_confirmParameter(c, c->m_saoEncodingRate > 0.0, "Frame parallel processing: SaoEncodingRate is not supported (must be disabled)" );
     vvenc_confirmParameter(c, c->m_alfTempPred,           "Frame parallel processing: ALFTempPred is not supported (must be disabled)" );
+#if ENABLE_SPATIAL_SCALABLE
+    vvenc_confirmParameter(c, c->m_maxLayers > 1,         "Frame parallel processing: MaxLayers > 1 is not supported (must be less than 2)" );
+#endif
+
 #if ENABLE_TRACING
     vvenc_confirmParameter(c, c->m_traceFile[0] != '\0' && c->m_maxParallelFrames > 1, "Tracing and frame parallel encoding not supported" );
 #endif
@@ -2483,6 +2533,9 @@ static bool checkCfgParameter( vvenc_config *c )
   vvenc_confirmParameter(c, abs(c->m_sliceChromaQpOffsetIntraOrPeriodic[1]                 ) > 12, "Intra/periodic Cr QP Offset exceeds supported range (-12 to 12)" );
   vvenc_confirmParameter(c, abs(c->m_sliceChromaQpOffsetIntraOrPeriodic[1]  + c->m_chromaCrQpOffset ) > 12, "Intra/periodic Cr QP Offset, when combined with the PPS Cr offset, exceeds supported range (-12 to 12)" );
 
+#if ENABLE_SPATIAL_SCALABLE
+  vvenc_confirmParameter(c, c->m_maxSublayers < 1 || c->m_maxSublayers > 7, "MaxSublayers must be in range [1..7]");
+#endif
   vvenc_confirmParameter(c, c->m_fastLocalDualTreeMode < 0 || c->m_fastLocalDualTreeMode > 2, "FastLocalDualTreeMode must be in range [0..2]" );
 
   int extraRPLs = 0;

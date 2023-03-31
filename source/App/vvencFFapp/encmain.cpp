@@ -78,6 +78,97 @@ int main(int argc, char* argv[])
 
   vvenc_set_SIMD_extension( simdOpt.c_str() );
 
+#if ENABLE_SPATIAL_SCALABLE
+  std::fstream bitstream;
+  vvencEncLibCommon* encLibCommon = vvenc_enclibcommon_create();
+
+  std::vector<EncApp*> pcEncApp(1);
+  bool resized = false;
+  int layerIdx = 0;
+  char** layerArgv = new char* [argc];
+
+  do
+  {
+    pcEncApp[layerIdx] = new EncApp(bitstream, encLibCommon);
+
+    // parse configuration per layer
+    int j = 0;
+    for (int i = 0; i < argc; i++)
+    {
+      if (argv[i][0] == '-' && argv[i][1] == 'l')
+      {
+        if (argc <= i + 1)
+        {
+          //THROW("Command line parsing error: missing parameter after -lx\n");
+          std::cerr << "Command line parsing error: missing parameter after -lx\n" << std::endl;
+          return 1;
+        }
+        int numParams = 1; // count how many parameters are consumed
+        // check for long parameters, which start with "--"
+        const std::string param = argv[i + 1];
+        if (param.rfind("--", 0) != 0)
+        {
+          // only short parameters have a second parameter for the value
+          if (argc <= i + 2)
+          {
+            //THROW("Command line parsing error: missing parameter after -lx\n");
+            std::cerr << "Command line parsing error: missing parameter after -lx\n" << std::endl;
+            return 1;
+          }
+          numParams++;
+        }
+        // check if correct layer index
+        if (argv[i][2] == std::to_string(layerIdx).c_str()[0])
+        {
+          layerArgv[j] = argv[i + 1];
+          if (numParams > 1)
+          {
+            layerArgv[j + 1] = argv[i + 2];
+          }
+          j += numParams;
+        }
+        i += numParams;
+      }
+      else
+      {
+        layerArgv[j] = argv[i];
+        j++;
+      }
+    }
+
+    if (!pcEncApp[layerIdx]->parseCfg(j, layerArgv))
+    {
+      pcEncApp[layerIdx]->destroy();
+      return 1;
+    }
+
+    if (pcEncApp[layerIdx]->isShowVersionHelp())
+    {
+      return 0;
+    }
+
+    pcEncApp[layerIdx]->createLib(layerIdx);
+
+    if (!resized)
+    {
+      pcEncApp.resize(pcEncApp[layerIdx]->getMaxLayers());
+      resized = true;
+    }
+
+    layerIdx++;
+  } while (layerIdx < (int)pcEncApp.size());
+
+  delete[] layerArgv;
+
+  // Consistency check between layers
+  if (!pcEncApp[0]->isDecode() && layerIdx > 1) {
+    for (int i = 0; i < layerIdx; i++) {
+      if (pcEncApp[i]->check(pcEncApp) != VVENC_OK) {
+        return 1;
+      }
+    }
+  }
+#else
   EncApp* pcEncApp = new EncApp;
 
   // parse configuration
@@ -90,6 +181,7 @@ int main(int argc, char* argv[])
   {
     return 0;
   }
+#endif
 
   // starting time
   auto startTime  = std::chrono::steady_clock::now();
@@ -97,8 +189,46 @@ int main(int argc, char* argv[])
   msgApp( VVENC_INFO, " started @ %s", std::ctime(&startTime2) );
   clock_t startClock = clock();
 
+#if ENABLE_SPATIAL_SCALABLE
+  int ret = VVENC_OK;
+
+  if (pcEncApp[0]->isDecode()) {
+      ret = pcEncApp[0]->decode();
+  }
+  else {
+    for (int pass = 0; pass < pcEncApp[0]->getRCNumPasses(); pass++) {
+      // initialize encoder pass
+      for (auto& encApp : pcEncApp) {
+        if (encApp->initPass(pass) != VVENC_OK) {
+          return 1;
+        }
+      }
+      // main loop
+      bool inputDone = false;
+      while (!inputDone) {
+        bool encDone = false;
+        while (!encDone) {
+          for (auto& encApp : pcEncApp) {
+            ret = encApp->encode(inputDone, encDone);
+            if (ret != VVENC_OK) {
+              return 1;
+            }
+          }
+        }
+      }
+      for (auto& encApp : pcEncApp) {
+        encApp->closeYuvInputFile();
+      }
+      // reset encCommonLib before next pass
+      if (pass + 1 < pcEncApp[0]->getRCNumPasses()) {
+        vvenc_enclibcommon_reset(encLibCommon);
+      }
+    }
+  }
+#else
   // call encoding function
   int ret = pcEncApp->encode();
+#endif
 
   // ending time
   clock_t endClock = clock();
@@ -106,7 +236,15 @@ int main(int argc, char* argv[])
   std::time_t endTime2 = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
   auto encTime = std::chrono::duration_cast<std::chrono::milliseconds>( endTime - startTime).count();
 
+#if ENABLE_SPATIAL_SCALABLE
+  for (auto& encApp : pcEncApp) {
+    encApp->destroy();
+    delete encApp;
+  }
+  vvenc_enclibcommon_close(encLibCommon);
+#else
   delete pcEncApp;
+#endif
 
   msgApp( VVENC_INFO, "\n finished @ %s", std::ctime(&endTime2) );
   msgApp( VVENC_INFO, " Total Time: %12.3f sec. [user] %12.3f sec. [elapsed]\n", (endClock - startClock) * 1.0 / CLOCKS_PER_SEC, encTime / 1000.0);

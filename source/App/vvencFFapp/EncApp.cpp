@@ -188,6 +188,70 @@ bool EncApp::parseCfg( int argc, char* argv[])
   return ret;
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+/**
+ * main encode function
+ */
+int EncApp::encode(bool& inputDone, bool& encDone)
+{
+  vvenc_config& vvencCfg = m_vvenc_config;
+
+  // check for more input pictures
+  inputDone = (vvencCfg.m_framesToBeEncoded > 0
+      && m_framesRcvd >= (vvencCfg.m_framesToBeEncoded + vvencCfg.m_leadFrames + vvencCfg.m_trailFrames))
+      || m_yuvInputFile.isEof();
+
+  // read input YUV
+  if (!inputDone)
+  {
+      if (0 != m_yuvInputFile.readYuvBuf(m_yuvInBuf, inputDone))
+      {
+          msgApp(VVENC_ERROR, "read input file failed: %s\n", m_yuvInputFile.getLastError().c_str());
+          vvenc_encoder_close(m_encCtx);
+          vvenc_YUVBuffer_free_buffer(&m_yuvInBuf);
+          vvenc_accessUnit_free_payload(&m_au);
+          closeFileIO();
+          return -1;
+      }
+      if (!inputDone)
+      {
+          if (vvencCfg.m_FrameRate > 0)
+          {
+              m_yuvInBuf.cts = m_framesRcvd * vvencCfg.m_TicksPerSecond * vvencCfg.m_FrameScale / vvencCfg.m_FrameRate;
+              m_yuvInBuf.ctsValid = true;
+          }
+          m_framesRcvd += 1;
+      }
+  }
+
+  // encode picture
+  vvencYUVBuffer* inputPacket = nullptr;
+  if (!inputDone)
+  {
+      inputPacket = &m_yuvInBuf;
+  }
+  int iRet = vvenc_encode(m_encCtx, inputPacket, &m_au, &encDone);
+  if (0 != iRet)
+  {
+      msgApp(VVENC_ERROR, "encoding failed: err code %d: %s\n", iRet, vvenc_get_last_error(m_encCtx));
+      encDone = true;
+      inputDone = true;
+  }
+
+  // write out encoded access units
+  if (m_au.payloadUsedSize)
+  {
+      outputAU(m_au);
+  }
+
+  // temporally skip frames
+  if (vvencCfg.m_temporalSubsampleRatio > 1 && !inputDone)
+  {
+      m_yuvInputFile.skipYuvFrames(vvencCfg.m_temporalSubsampleRatio - 1, vvencCfg.m_SourceWidth, vvencCfg.m_SourceHeight);
+  }
+  return iRet;
+}
+#else
 /**
  * main encode function
  */
@@ -377,6 +441,7 @@ int EncApp::encode()
   closeFileIO();
   return iRet;
 }
+#endif
 
 void EncApp::outputAU( const vvencAccessUnit& au )
 {
@@ -400,6 +465,204 @@ void EncApp::outputYuv( void* ctx, vvencYUVBuffer* yuvOutBuf )
   }
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+bool EncApp::isDecode() {
+  return m_cEncAppCfg.m_decode;
+}
+
+int EncApp::decode() {
+  apputils::VVEncAppCfg& appCfg = m_cEncAppCfg;
+  vvenc_config& vvencCfg = m_vvenc_config;
+  return vvenc_decode_bitstream(appCfg.m_bitstreamFileName.c_str(), vvencCfg.m_traceFile, vvencCfg.m_traceRule);
+}
+
+int EncApp::createLib(int layerIdx)
+{
+  m_layerIdx = layerIdx;
+
+  apputils::VVEncAppCfg& appCfg = m_cEncAppCfg;
+  vvenc_config& vvencCfg = m_vvenc_config;
+  if (appCfg.m_decode)
+  {
+    return VVENC_OK;
+  }
+
+  // initialize encoder lib
+  m_encCtx = vvenc_encoder_create();
+  if (nullptr == m_encCtx)
+  {
+    return -1;
+  }
+
+  const int layerId = vvencCfg.m_layerId[layerIdx];
+
+  int iRet = vvenc_encoder_open(m_encCtx, &vvencCfg, m_encLibCommonCtx, layerId);
+  if (0 != iRet)
+  {
+    msgApp(VVENC_ERROR, "open encoder failed: %s\n", vvenc_get_last_error(m_encCtx));
+    vvenc_encoder_close(m_encCtx);
+    return iRet;
+  }
+
+  if (!appCfg.m_reconFileName.empty() && (vvencCfg.m_maxLayers > 1))
+  {
+    size_t pos = appCfg.m_reconFileName.find_last_of('.');
+    if (pos != string::npos)
+    {
+      appCfg.m_reconFileName.insert(pos, std::to_string(layerIdx));
+    }
+    else
+    {
+      appCfg.m_reconFileName.append(std::to_string(layerIdx));
+    }
+  }
+
+  if (!appCfg.m_reconFileName.empty())
+  {
+    vvenc_encoder_set_RecYUVBufferCallback(m_encCtx, &this->m_yuvReconFile, outputYuv);
+  }
+
+  // get the adapted config
+  vvenc_get_config(m_encCtx, &vvencCfg);
+
+  std::stringstream css;
+  css << appCfg.getAppConfigAsString(vvencCfg.m_verbosity);
+  css << vvenc_get_config_as_string(&vvencCfg, vvencCfg.m_verbosity);
+  css << std::endl;
+
+  msgApp(VVENC_INFO, "%s", css.str().c_str());
+  printChromaFormat();
+  if (!strcmp(appCfg.m_inputFileName.c_str(), "-"))
+  {
+    msgApp(VVENC_INFO, " trying to read from stdin");
+  }
+
+  if (!openFileIO())
+  {
+    vvenc_encoder_close(m_encCtx);
+    return -1;
+  }
+
+  if (!appCfg.m_reconFileName.empty())
+  {
+    vvenc_encoder_set_RecYUVBufferCallback(m_encCtx, &this->m_yuvReconFile, outputYuv);
+  }
+
+  // create buffer for input YUV pic
+  vvenc_YUVBuffer_default(&m_yuvInBuf);
+  vvenc_YUVBuffer_alloc_buffer(&m_yuvInBuf, vvencCfg.m_internChromaFormat, vvencCfg.m_SourceWidth, vvencCfg.m_SourceHeight);
+
+  // create sufficient memory for output data
+  vvenc_accessUnit_default(&m_au);
+  const int auSizeScale = vvencCfg.m_internChromaFormat <= VVENC_CHROMA_420 ? 2 : 3;
+  vvenc_accessUnit_alloc_payload(&m_au, auSizeScale * vvencCfg.m_SourceWidth * vvencCfg.m_SourceHeight + 1024);
+
+  m_framesRcvd = 0;
+
+  return VVENC_OK;
+}
+
+int EncApp::check(const std::vector<EncApp*>& encApps)
+{
+  int ret = VVENC_OK;
+  std::vector<vvencEncoder*> encs;
+  for (const auto& encApp : encApps) {
+    encs.push_back(encApp->m_encCtx);
+  }
+  ret = vvenc_encoder_check(m_encCtx, &encs);
+  if (ret != VVENC_OK) {
+    msgApp(VVENC_ERROR, vvenc_get_last_error(m_encCtx));
+    return VVENC_ERR_PARAMETER;
+  }
+
+  // Check if the FramesToBeEncoded between the layers match.
+  for (const auto& encApp : encApps) {
+    if (encApp->m_vvenc_config.m_framesToBeEncoded != this->m_vvenc_config.m_framesToBeEncoded) {
+      msgApp(VVENC_ERROR, "FramesToBeEncoded in layerIdx:%d and layerIdx:%d does not match.",  encApp->m_layerIdx, this->m_layerIdx);
+      return VVENC_ERR_PARAMETER;
+    }
+  }
+  // Check if Target Bitrate matches between layers
+  for (const auto& encApp : encApps) {
+    bool enableRC0 = encApp->m_vvenc_config.m_RCTargetBitrate > 0;
+    bool enableRC1 = this->m_vvenc_config.m_RCTargetBitrate > 0;
+    if (enableRC0 != enableRC1) {
+      msgApp(VVENC_ERROR, "RateControl(TargetBitrate) settings are inconsistent between layersIdx:%d and layerIdx:%d.", encApp->m_layerIdx, this->m_layerIdx);
+      return VVENC_ERR_PARAMETER;
+    }
+  }
+  return VVENC_OK;
+}
+
+int EncApp::initPass(int pass)
+{
+  apputils::VVEncAppCfg& appCfg = m_cEncAppCfg;
+  vvenc_config& vvencCfg = m_vvenc_config;
+
+  // open input YUV
+
+  if (m_yuvInputFile.open(appCfg.m_inputFileName, false, vvencCfg.m_inputBitDepth[0], vvencCfg.m_MSBExtendedBitDepth[0], vvencCfg.m_internalBitDepth[0],
+    appCfg.m_inputFileChromaFormat, vvencCfg.m_internChromaFormat, appCfg.m_bClipInputVideoToRec709Range, appCfg.m_packedYUVInput,
+    appCfg.m_forceY4mInput))
+  {
+    msgApp(VVENC_ERROR, "open input file failed: %s\n", m_yuvInputFile.getLastError().c_str());
+    vvenc_encoder_close(m_encCtx);
+    vvenc_YUVBuffer_free_buffer(&m_yuvInBuf);
+    vvenc_accessUnit_free_payload(&m_au);
+    closeFileIO();
+    return -1;
+  }
+
+  const int remSkipFrames = appCfg.m_FrameSkip - vvencCfg.m_leadFrames;
+  if (remSkipFrames < 0)
+  {
+    msgApp(VVENC_ERROR, "skip frames (%d) less than number of lead frames required (%d)\n", appCfg.m_FrameSkip, vvencCfg.m_leadFrames);
+    vvenc_encoder_close(m_encCtx);
+    vvenc_YUVBuffer_free_buffer(&m_yuvInBuf);
+    vvenc_accessUnit_free_payload(&m_au);
+    closeFileIO();
+    return -1;
+  }
+  if (remSkipFrames > 0)
+  {
+    m_yuvInputFile.skipYuvFrames(remSkipFrames, vvencCfg.m_SourceWidth, vvencCfg.m_SourceHeight);
+  }
+
+  // initialize encoder pass
+  int iRet = vvenc_init_pass(m_encCtx, pass, appCfg.m_RCStatsFileName.c_str());
+  if (iRet != 0)
+  {
+    msgApp(VVENC_ERROR, "init pass failed: %s\n", vvenc_get_last_error(m_encCtx));
+    vvenc_encoder_close(m_encCtx);
+    vvenc_YUVBuffer_free_buffer(&m_yuvInBuf);
+    vvenc_accessUnit_free_payload(&m_au);
+    closeFileIO();
+    return -1;
+  }
+  return iRet;
+}
+
+void EncApp::closeYuvInputFile()
+{
+  m_yuvInputFile.close();
+  m_framesRcvd = 0;
+}
+
+void EncApp::destroy()
+{
+  vvenc_config& vvencCfg = m_vvenc_config;
+  printRateSummary(m_framesRcvd - (vvencCfg.m_leadFrames + vvencCfg.m_trailFrames));
+
+  // cleanup encoder lib
+  vvenc_encoder_close(m_encCtx);
+
+  vvenc_YUVBuffer_free_buffer(&m_yuvInBuf);
+  vvenc_accessUnit_free_payload(&m_au);
+
+  closeFileIO();
+}
+#endif
+
 // ====================================================================================================================
 // protected member functions
 // ====================================================================================================================
@@ -418,7 +681,11 @@ bool EncApp::openFileIO()
   }
 
   // output bitstream
+#if ENABLE_SPATIAL_SCALABLE
+  if (!m_cEncAppCfg.m_bitstreamFileName.empty() && !m_bitstream.is_open())
+#else
   if ( !m_cEncAppCfg.m_bitstreamFileName.empty() )
+#endif
   {
     m_bitstream.open( m_cEncAppCfg.m_bitstreamFileName.c_str(), fstream::binary | fstream::out );
     if( ! m_bitstream )
