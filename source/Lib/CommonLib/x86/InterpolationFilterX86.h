@@ -114,7 +114,11 @@ static void fullPelCopySSE( const ClpRng& clpRng, const void*_src, int srcStride
 
         if( isFirst == isLast )
         {
+#if ENABLE_SPATIAL_SCALABLE
+          vsum =  vsrc;
+#else
           vsum =  _mm_min_epi16( vibdimax, _mm_max_epi16( vibdimin, vsrc ) );
+#endif
         }
         else if( isFirst )
         {
@@ -174,7 +178,11 @@ static void fullPelCopySSE_M4( const ClpRng& clpRng, const void*_src, ptrdiff_t 
 
       if( isFirst == isLast )
       {
+#if ENABLE_SPATIAL_SCALABLE
+        vsum = vsrc;
+#else
        vsum = _mm_min_epi16( vibdimax, _mm_max_epi16( vibdimin, vsrc ) );
+#endif
       }
       else if( isFirst )
       {
@@ -234,7 +242,11 @@ static void fullPelCopyAVX2( const ClpRng& clpRng, const void*_src, int srcStrid
 
         if( isFirst == isLast )
         {
+#if ENABLE_SPATIAL_SCALABLE
+          vsum = vsrc;
+#else
           vsum = _mm256_min_epi16( vibdimax, _mm256_max_epi16( vibdimin, vsrc ) );
+#endif
         }
         else if( isFirst )
         {
@@ -2801,12 +2813,22 @@ void simdFilter8xX_N4( const ClpRng& clpRng, Pel const *src, int srcStride, Pel*
     int vcoeffh[2];
     int vcoeffv[2];
 
+#if ENABLE_SPATIAL_SCALABLE
+#if !_DEBUG
+    __m128i vsrcv0, vsrcv1, vsrcv2, vsrcv3;
+#else
+    __m128i
+      vsrcv0 = _mm_setzero_si128(), vsrcv1 = _mm_setzero_si128(),
+      vsrcv2 = _mm_setzero_si128(), vsrcv3 = _mm_setzero_si128();
+#endif
+#else
 #ifndef NDEBUG
     __m128i vsrcv0, vsrcv1, vsrcv2, vsrcv3;
 #else
     __m128i
       vsrcv0 = _mm_setzero_si128(), vsrcv1 = _mm_setzero_si128(),
       vsrcv2 = _mm_setzero_si128(), vsrcv3 = _mm_setzero_si128();
+#endif
 #endif
 
     for( int i = 0; i < 4; i += 2 )

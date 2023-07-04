@@ -87,7 +87,11 @@ int run( vvenc_config* vvencCfg, int maxFrames, bool runTillFlushed )
   }
 
   // initialize the encoder
+#if ENABLE_SPATIAL_SCALABLE
+  iRet = vvenc_encoder_open( enc, vvencCfg, NULL, 0 );
+#else
   iRet = vvenc_encoder_open( enc, vvencCfg );
+#endif
   if( 0 != iRet )
   {
     printf("cannot open encoder. ret: %d, %s\n", iRet, vvenc_get_last_error( enc ) );

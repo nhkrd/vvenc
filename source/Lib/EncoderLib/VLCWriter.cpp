@@ -51,6 +51,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/Unit.h"
 #include "CommonLib/Picture.h" // th remove this
 #include "CommonLib/dtrace_next.h"
+#if ENABLE_SPATIAL_SCALABLE
+#include "CommonLib/ProfileLevelTier.h"
+#endif
 
 //! \ingroup EncoderLib
 //! \{
@@ -1203,10 +1206,20 @@ void HLSWriter::codeVPS(const VPS* pcVPS)
     {
       WRITE_FLAG(pcVPS->ptPresent[i],                   "vps_ptl_present_flag");
     }
+#if ENABLE_SPATIAL_SCALABLE
+    if (!pcVPS->defaultPtlDpbHrdMaxTidFlag)
+#else
     if(!pcVPS->allLayersSameNumSubLayers)
+#endif
     {
       WRITE_CODE(pcVPS->ptlMaxTemporalId[i] ,3,         "vps_ptl_max_temporal_id");
     }
+#if ENABLE_SPATIAL_SCALABLE
+    else
+    {
+      CHECK(pcVPS->ptlMaxTemporalId[i] != pcVPS->maxSubLayers - 1, "When vps_default_ptl_dpb_hrd_max_tid_flag is equal to 1, the value of vps_ptl_max_tid[ i ] is inferred to be equal to vps_max_sublayers_minus1");
+    }
+#endif
   }
   int cnt = 0;
   while (m_pcBitIf->getNumBitsUntilByteAligned())
@@ -1224,6 +1237,55 @@ void HLSWriter::codeVPS(const VPS* pcVPS)
     if(pcVPS->numPtls > 1 && pcVPS->numPtls != pcVPS->totalNumOLSs)
       WRITE_CODE(pcVPS->olsPtlIdx[i], 8,                "vps_ols_ptl_idx");
   }
+#if ENABLE_SPATIAL_SCALABLE
+  if (!pcVPS->eachLayerIsAnOls)
+  {
+    WRITE_UVLC(pcVPS->numDpbParams - 1, "vps_num_dpb_params_minus1");
+    if (pcVPS->maxSubLayers > 1)
+    {
+      WRITE_FLAG(pcVPS->sublayerDpbParamsPresent, "vps_sublayer_dpb_params_present_flag");
+    }
+    for (int i = 0; i < pcVPS->numDpbParams; i++)
+    {
+      if (!pcVPS->defaultPtlDpbHrdMaxTidFlag)
+      {
+        WRITE_CODE(pcVPS->dpbMaxTemporalId[i], 3, "vps_dpb_max_temporal_id[i]");
+      }
+      if (pcVPS->maxSubLayers == 1)
+      {
+        CHECK(pcVPS->dpbMaxTemporalId[i] != pcVPS->maxSubLayers - 1, "When vps_default_ptl_dpb_hrd_max_tid_flag is equal to 1, the value of vps_dpb_max_tid[ i ] is inferred to be equal to vps_max_sublayers_minus1");
+      }
+
+      for (int j = (pcVPS->sublayerDpbParamsPresent ? 0 : pcVPS->dpbMaxTemporalId[i]); j <= pcVPS->dpbMaxTemporalId[i]; j++)
+      {
+        CHECK(pcVPS->dpbParameters[i].maxDecPicBuffering[j] < 1, "MaxDecPicBuffering must be greater than 0");
+        WRITE_UVLC(pcVPS->dpbParameters[i].maxDecPicBuffering[j] - 1, "dpb_max_dec_pic_buffering_minus1[i]");
+        WRITE_UVLC(pcVPS->dpbParameters[i].numReorderPics[j], "dpb_max_num_reorder_pics[i]");
+        WRITE_UVLC(pcVPS->dpbParameters[i].maxLatencyIncreasePlus1[j], "dpb_max_latency_increase_plus1[i]");
+      }
+    }
+
+    for (int i = 0; i < pcVPS->totalNumOLSs; i++)
+    {
+      if (pcVPS->numLayersInOls[i] > 1)
+      {
+        WRITE_UVLC(pcVPS->olsDpbPicSize[i].width, "vps_ols_dpb_pic_width[i]");
+        WRITE_UVLC(pcVPS->olsDpbPicSize[i].height, "vps_ols_dpb_pic_height[i]");
+        WRITE_CODE(pcVPS->olsDpbChromaFormatIdc[i], 2, "vps_ols_dpb_chroma_format[i]");
+        const vvencProfile profile = pcVPS->profileTierLevel[pcVPS->olsPtlIdx[i]].profileIdc;
+        if (profile != vvencProfile::VVENC_PROFILE_AUTO)
+        {
+          CHECK(pcVPS->olsDpbBitDepthMinus8[i] + 8 > ProfileFeatures::getProfileFeatures(profile)->maxBitDepth, "vps_ols_dpb_bitdepth_minus8[ i ] exceeds range supported by signalled profile");
+        }
+        WRITE_UVLC(pcVPS->olsDpbBitDepthMinus8[i], "vps_ols_dpb_bitdepth_minus8[i]");
+        if (pcVPS->numDpbParams > 1 && (pcVPS->numDpbParams != pcVPS->numMultiLayeredOlss))
+        {
+          WRITE_UVLC(pcVPS->olsDpbParamsIdx[i], "vps_ols_dpb_params_idx[i]");
+        }
+      }
+    }
+  }
+#else
   if( !pcVPS->allIndependentLayers )
   {
     WRITE_UVLC( pcVPS->numDpbParams,                    "vps_num_dpb_params" );
@@ -1278,6 +1340,7 @@ void HLSWriter::codeVPS(const VPS* pcVPS)
       }
     }
   }
+#endif
 
 
   if (!pcVPS->eachLayerIsAnOls)

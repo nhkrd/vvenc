@@ -184,6 +184,11 @@ bool Slice::getRapPicFlag() const
 
 void  Slice::sortPicList        (PicList& rcListPic)
 {
+#if ENABLE_SPATIAL_SCALABLE
+  rcListPic.sort([](Picture* const& a, Picture* const& b) {
+    return a->getPOC() < b->getPOC() || (a->getPOC() == b->getPOC() && a->layerId < b->layerId);
+    });
+#else
   Picture*    picExtract;
   Picture*    picInsert;
 
@@ -218,6 +223,7 @@ void  Slice::sortPicList        (PicList& rcListPic)
     rcListPic.insert( iterPicInsert, iterPicExtract, iterPicExtract_1 );
     rcListPic.erase( iterPicExtract );
   }
+#endif
 }
 
 
@@ -389,8 +395,37 @@ void Slice::constructRefPicList(const PicList& rcListPic, bool extBorder)
   {
     RefPicList eRefList = RefPicList(refList);
     numOfActiveRef = numRefIdx[ eRefList ];
+#if ENABLE_SPATIAL_SCALABLE
+    int layerIdx = pic->cs->vps == nullptr ? 0 : pic->cs->vps->generalLayerIdx[pic->layerId];
+#endif
     for (int ii = 0; ii < numOfActiveRef; ii++)
     {
+#if ENABLE_SPATIAL_SCALABLE
+      if (rpl[eRefList]->isInterLayerRefPic[ii])
+      {
+        CHECK(rpl[eRefList]->interLayerRefPicIdx[ii] == NOT_VALID, "Wrong ILRP index");
+
+        int refLayerId = pic->cs->vps->layerId[pic->cs->vps->directRefLayerIdx[layerIdx][rpl[eRefList]->interLayerRefPicIdx[ii]]];
+
+        int poc_ = poc;
+
+        PicList::const_iterator  iterPic = rcListPic.begin();
+        pcRefPic = *(iterPic);
+
+        while (iterPic != rcListPic.end())
+        {
+          if (pcRefPic->getPOC() == poc_ && pcRefPic->layerId == refLayerId)
+          {
+            break;
+          }
+          iterPic++;
+          pcRefPic = *(iterPic);
+        }
+
+        pcRefPic->isLongTerm = true;
+      }
+      else
+#endif
       if (!rpl[eRefList]->isLongtermRefPic[ii])
       {
         int poc_ = poc + rpl[eRefList]->refPicIdentifier[ii];
@@ -400,7 +435,11 @@ void Slice::constructRefPicList(const PicList& rcListPic, bool extBorder)
 
         while ( iterPic != rcListPic.end() )
         {
+#if ENABLE_SPATIAL_SCALABLE
+          if (pcRefPic->getPOC() == poc_ && pcRefPic->layerId == pic->layerId)
+#else
           if(pcRefPic->getPOC() == poc_)
+#endif
           {
             break;
           }
@@ -436,7 +475,11 @@ void Slice::updateRefPicCounter( int step )
     int numOfActiveRef = numRefIdx[ refList ];
     for ( int i = 0; i < numOfActiveRef; i++ )
     {
+#if ENABLE_SPATIAL_SCALABLE
+      refPicList[refList][i]->unscaledPic->refCounter += step;
+#else
       refPicList[ refList ][ i ]->refCounter += step;
+#endif
     }
   }
 }
@@ -1032,24 +1075,101 @@ bool Slice::isRplPicMissing( const PicList& rcListPic, const RefPicList refList,
   return false;
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcListPic, const ReferencePictureList* pRPL0, const ReferencePictureList* pRPL1, const VVEncCfg& encCfg)
+#else
 void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcListPic, const ReferencePictureList* pRPL0, const ReferencePictureList* pRPL1)
+#endif
 {
   Picture* picCand;;
   int pocCycle = 0;
 
+#if ENABLE_SPATIAL_SCALABLE
+  const VPS* vps = pic->cs->vps;
+  int layerIdx = vps == nullptr ? 0 : vps->generalLayerIdx[pic->layerId];
+  bool isIntraLayerPredAllowed = (vps->independentLayer[layerIdx] || (vps->vpsCfgPredDirection[TLayer] != 1))
+    && (!isIRAP() || (encCfg.m_avoidIntraInDepLayer && layerIdx));
+  bool isInterLayerPredAllowed = !vps->independentLayer[layerIdx] && (vps->vpsCfgPredDirection[TLayer] != 2);
+  // NOTE : The following implementation is compatible with the original vvenc in single layer encoding.
+  if (!isIntraLayerPredAllowed) {
+    isIntraLayerPredAllowed = !isIDRorBLA() && vps->independentLayer[layerIdx];
+  }
+#else
   if ( isIDRorBLA() ) return; //Assume that all pic in the DPB will be flushed anyway so no need to check.
+#endif
 
   ReferencePictureList rplSrc0 = *pRPL0;
   ReferencePictureList rplSrc1 = *pRPL1;
 
   ReferencePictureList* pLocalRPL0 = &rplLocal[0];
   (*pLocalRPL0) = ReferencePictureList();
+#if ENABLE_SPATIAL_SCALABLE
+  (*pLocalRPL0).interLayerPresent = sps->interLayerPresent;
+#endif
 
   uint32_t numOfSTRPL0 = 0;
   uint32_t numOfLTRPL0 = 0;
   uint32_t numOfILRPL0 = 0;
   uint32_t numOfRefPic = rplSrc0.numberOfShorttermPictures + rplSrc0.numberOfLongtermPictures;
   uint32_t refPicIdxL0 = 0;
+#if ENABLE_SPATIAL_SCALABLE
+  static_vector<int, VVENC_MAX_NUM_REF_PICS> higherTLayerRefs;
+  higherTLayerRefs.resize(0);
+  static_vector<int, VVENC_MAX_NUM_REF_PICS> inactiveRefs;
+  inactiveRefs.resize(0);
+  if (isIntraLayerPredAllowed)
+  {
+    for (int ii = 0; ii < numOfRefPic; ii++)
+    {
+      // loop through all pictures in the reference picture buffer
+      PicList::const_iterator iterPic = rcListPic.begin();
+      bool isAvailable = false;
+      bool hasHigherTId = false;
+
+      pocCycle = 1 << (sps->bitsForPOC);
+      while (iterPic != rcListPic.end())
+      {
+        picCand = *(iterPic++);
+        if (pic->layerId == picCand->layerId && picCand->isReferenced)
+        {
+          if (!pRPL0->isLongtermRefPic[ii] && picCand->poc == poc + pRPL0->refPicIdentifier[ii] && !isPocRestrictedByDRAP(picCand->poc, picCand->precedingDRAP))
+          {
+            isAvailable = true;
+            break;
+          }
+          else if (pRPL0->isLongtermRefPic[ii] && (picCand->poc & (pocCycle - 1)) == pRPL0->refPicIdentifier[ii] && !isPocRestrictedByDRAP(picCand->poc, picCand->precedingDRAP))
+          {
+            isAvailable = true;
+            break;
+          }
+        }
+      }
+      if (isAvailable)
+      {
+        if (isIRAP())
+        {
+          inactiveRefs.push_back(ii);
+        }
+        else if (hasHigherTId)
+        {
+          higherTLayerRefs.push_back(ii);
+        }
+        else if (refPicIdxL0 >= pRPL1->numberOfActivePictures && layerIdx && vps && !vps->allIndependentLayers && isInterLayerPredAllowed)
+        {
+          inactiveRefs.push_back(ii);
+        }
+        else
+        {
+          pLocalRPL0->setRefPicIdentifier(refPicIdxL0, pRPL0->refPicIdentifier[ii], pRPL0->isLongtermRefPic[ii], pRPL0->isInterLayerRefPic[ii], pRPL0->interLayerRefPicIdx[ii]);
+          refPicIdxL0++;
+          numOfSTRPL0 = numOfSTRPL0 + ((pRPL0->isLongtermRefPic[ii]) ? 0 : 1);
+          numOfLTRPL0 = numOfLTRPL0 + ((pRPL0->isLongtermRefPic[ii]) ? 1 : 0);
+          isAvailable = false;
+        }
+      }
+    }
+  }
+#else
   for (int ii = 0; ii < numOfRefPic; ii++)
   {
     // loop through all pictures in the reference picture buffer
@@ -1083,6 +1203,44 @@ void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcList
       isAvailable = false;
     }
   }
+#endif
+#if ENABLE_SPATIAL_SCALABLE
+  // inter-layer reference pictures are added to the end of the reference picture list
+  if (layerIdx && vps && !vps->allIndependentLayers && isInterLayerPredAllowed)
+  {
+    numOfRefPic = pRPL0->numberOfInterLayerPictures ? pRPL0->numberOfInterLayerPictures : encCfg.m_numRefLayers[layerIdx];
+
+    for (int ii = 0; ii < numOfRefPic; ii++)
+    {
+      // loop through all pictures in the reference picture buffer
+      PicList::const_iterator iterPic = rcListPic.begin();
+
+      while (iterPic != rcListPic.end() && ii < numOfRefPic)
+      {
+        picCand = *(iterPic++);
+        int refLayerIdx = vps->generalLayerIdx[picCand->layerId];
+        if (picCand->isReferenced && picCand->poc == pic->poc && vps->directRefLayer[layerIdx][refLayerIdx]
+          && xCheckMaxTidILRefPics(layerIdx, picCand, isIRAP()))
+        {
+          pLocalRPL0->setRefPicIdentifier(refPicIdxL0, 0, true, true, vps->interLayerRefIdx[layerIdx][refLayerIdx]);
+          refPicIdxL0++;
+          numOfILRPL0++;
+          ii++;
+        }
+      }
+    }
+  }
+  // now add inactive refs
+  for (int i = 0; i < inactiveRefs.size(); i++)
+  {
+    const int ii = inactiveRefs[i];
+    pLocalRPL0->setRefPicIdentifier(refPicIdxL0, pRPL0->refPicIdentifier[ii], pRPL0->isLongtermRefPic[ii], false,
+      NOT_VALID);
+    refPicIdxL0++;
+    numOfSTRPL0 = numOfSTRPL0 + ((pRPL0->isLongtermRefPic[ii]) ? 0 : 1);
+    numOfLTRPL0 += (pRPL0->isLongtermRefPic[ii] && !pRPL0->isInterLayerRefPic[ii]) ? 1 : 0;
+  }
+#endif
 
   if( enableDRAPSEI)
   {
@@ -1107,14 +1265,84 @@ void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcList
     }
   }
 
+#if ENABLE_SPATIAL_SCALABLE
+  // now add higher TId refs
+  for (int i = 0; i < higherTLayerRefs.size(); i++)
+  {
+    const int ii = higherTLayerRefs[i];
+    pLocalRPL0->setRefPicIdentifier(refPicIdxL0, pRPL0->refPicIdentifier[ii], pRPL0->isLongtermRefPic[ii], false, NOT_VALID);
+    refPicIdxL0++;
+    numOfSTRPL0 = numOfSTRPL0 + ((pRPL0->isLongtermRefPic[ii]) ? 0 : 1);
+    numOfLTRPL0 += (pRPL0->isLongtermRefPic[ii] && !pRPL0->isInterLayerRefPic[ii]) ? 1 : 0;
+  }
+#endif
   ReferencePictureList* pLocalRPL1 = &rplLocal[1];
   (*pLocalRPL1) = ReferencePictureList();
+#if ENABLE_SPATIAL_SCALABLE
+  (*pLocalRPL1).interLayerPresent = sps->interLayerPresent;
+#endif
 
   uint32_t numOfSTRPL1 = 0;
   uint32_t numOfLTRPL1 = 0;
   uint32_t numOfILRPL1 = 0;
   numOfRefPic = rplSrc1.numberOfShorttermPictures + rplSrc1.numberOfLongtermPictures;
   uint32_t refPicIdxL1 = 0;
+#if ENABLE_SPATIAL_SCALABLE
+  higherTLayerRefs.resize(0);
+  inactiveRefs.resize(0);
+  if (isIntraLayerPredAllowed)
+  {
+    for (int ii = 0; ii < numOfRefPic; ii++)
+    {
+      // loop through all pictures in the reference picture buffer
+      PicList::const_iterator iterPic = rcListPic.begin();
+      bool isAvailable = false;
+      bool hasHigherTId = false;
+      pocCycle = 1 << sps->bitsForPOC;
+      while (iterPic != rcListPic.end())
+      {
+        picCand = *(iterPic++);
+        if (pic->layerId == picCand->layerId && picCand->isReferenced)
+        {
+          hasHigherTId = picCand->TLayer > pic->TLayer;
+          if (!pRPL1->isLongtermRefPic[ii] && picCand->poc == poc + pRPL1->refPicIdentifier[ii] && !isPocRestrictedByDRAP(picCand->poc, picCand->precedingDRAP))
+          {
+            isAvailable = true;
+            break;
+          }
+          else if (pRPL1->isLongtermRefPic[ii] && (picCand->poc & (pocCycle - 1)) == pRPL1->refPicIdentifier[ii] && !isPocRestrictedByDRAP(picCand->poc, picCand->precedingDRAP))
+          {
+            isAvailable = true;
+            break;
+          }
+        }
+      }
+      if (isAvailable)
+      {
+        if (isIRAP())
+        {
+          inactiveRefs.push_back(ii);
+        }
+        else if (hasHigherTId)
+        {
+          higherTLayerRefs.push_back(ii);
+        }
+        else if (refPicIdxL1 >= pRPL1->numberOfActivePictures && layerIdx && vps && !vps->allIndependentLayers && isInterLayerPredAllowed)
+        {
+          inactiveRefs.push_back(ii);
+        }
+        else
+        {
+          pLocalRPL1->setRefPicIdentifier(refPicIdxL1, pRPL1->refPicIdentifier[ii], pRPL1->isLongtermRefPic[ii], pRPL1->isInterLayerRefPic[ii], pRPL1->interLayerRefPicIdx[ii]);
+          refPicIdxL1++;
+          numOfSTRPL1 = numOfSTRPL1 + ((pRPL1->isLongtermRefPic[ii]) ? 0 : 1);
+          numOfLTRPL1 = numOfLTRPL1 + ((pRPL1->isLongtermRefPic[ii]) ? 1 : 0);
+          isAvailable = false;
+        }
+      }
+    }
+  }
+#else
   for (int ii = 0; ii < numOfRefPic; ii++)
   {
     // loop through all pictures in the reference picture buffer
@@ -1147,6 +1375,54 @@ void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcList
       isAvailable = false;
     }
   }
+#endif
+
+#if ENABLE_SPATIAL_SCALABLE
+  // inter-layer reference pictures are added to the end of the reference picture list
+  if (layerIdx && vps && !vps->allIndependentLayers && isInterLayerPredAllowed)
+  {
+    numOfRefPic = pRPL1->numberOfInterLayerPictures ? pRPL1->numberOfInterLayerPictures : encCfg.m_numRefLayers[layerIdx];
+
+    for (int ii = 0; ii < numOfRefPic; ii++)
+    {
+      // loop through all pictures in the reference picture buffer
+      PicList::const_iterator iterPic = rcListPic.begin();
+
+      while (iterPic != rcListPic.end() && ii < numOfRefPic)
+      {
+        picCand = *(iterPic++);
+        int refLayerIdx = vps->generalLayerIdx[picCand->layerId];
+        if (picCand->isReferenced && picCand->getPOC() == pic->getPOC() && vps->directRefLayer[layerIdx][refLayerIdx]
+          && xCheckMaxTidILRefPics(layerIdx, picCand, isIRAP()))
+        {
+          pLocalRPL1->setRefPicIdentifier(refPicIdxL1, 0, true, true, vps->interLayerRefIdx[layerIdx][refLayerIdx]);
+          refPicIdxL1++;
+          numOfILRPL1++;
+          ii++;
+        }
+      }
+    }
+  }
+
+  for (int i = 0; i < inactiveRefs.size(); i++)
+  {
+    const int ii = inactiveRefs[i];
+    pLocalRPL1->setRefPicIdentifier(refPicIdxL1, pRPL1->refPicIdentifier[ii], pRPL1->isLongtermRefPic[ii], false,
+      NOT_VALID);
+    refPicIdxL1++;
+    numOfSTRPL1 = numOfSTRPL1 + ((pRPL1->isLongtermRefPic[ii]) ? 0 : 1);
+    numOfLTRPL1 += (pRPL1->isLongtermRefPic[ii] && !pRPL1->isInterLayerRefPic[ii]) ? 1 : 0;
+  }
+  // now add higher TId refs
+  for (int i = 0; i < higherTLayerRefs.size(); i++)
+  {
+    const int ii = higherTLayerRefs[i];
+    pLocalRPL1->setRefPicIdentifier(refPicIdxL1, pRPL1->refPicIdentifier[ii], pRPL1->isLongtermRefPic[ii], false, NOT_VALID);
+    refPicIdxL1++;
+    numOfSTRPL1 = numOfSTRPL1 + ((pRPL1->isLongtermRefPic[ii]) ? 0 : 1);
+    numOfLTRPL1 += (pRPL1->isLongtermRefPic[ii] && !pRPL1->isInterLayerRefPic[ii]) ? 1 : 0;
+  }
+#endif
 
   //Copy from L1 if we have less than active ref pic
   int numOfNeedToFill = rplSrc0.numberOfActivePictures - (numOfLTRPL0 + numOfSTRPL0);
@@ -1191,17 +1467,27 @@ void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcList
   pLocalRPL0->numberOfShorttermPictures = numOfSTRPL0;
   pLocalRPL0->numberOfInterLayerPictures = numOfILRPL0;
 
+#if ENABLE_SPATIAL_SCALABLE
+  int numPics = (isIRAP()) ? 0 : numOfLTRPL0 + numOfSTRPL0;
+  pLocalRPL0->numberOfActivePictures = (numPics < pRPL0->numberOfActivePictures ? numPics : pRPL0->numberOfActivePictures) + numOfILRPL0;
+  pLocalRPL0->ltrpInSliceHeader = 1;
+#else
   int numPics = numOfLTRPL0 + numOfSTRPL0;
   pLocalRPL0->numberOfActivePictures  = ( numPics < rpl[0]->numberOfActivePictures ? numPics : rpl[0]->numberOfActivePictures ) + numOfILRPL0;
   pLocalRPL0->ltrpInSliceHeader = rpl[0]->ltrpInSliceHeader;
 
   pLocalRPL0->numberOfActivePictures    = (numOfLTRPL0 + numOfSTRPL0 < rplSrc0.numberOfActivePictures) ? numOfLTRPL0 + numOfSTRPL0 : rplSrc0.numberOfActivePictures;
   pLocalRPL0->ltrpInSliceHeader = rplSrc0.ltrpInSliceHeader;
+#endif
   rplIdx[0] = -1;
   rpl[0]    = pLocalRPL0;
 
   //Copy from L0 if we have less than active ref pic
+#if ENABLE_SPATIAL_SCALABLE
+  numOfNeedToFill = pLocalRPL0->numberOfActivePictures - (numOfLTRPL1 + numOfSTRPL1) - numOfILRPL0;
+#else
   numOfNeedToFill = pLocalRPL0->numberOfActivePictures - (numOfLTRPL1 + numOfSTRPL1);
+#endif
   for (int ii = 0; numOfNeedToFill > 0 && ii < (pLocalRPL0->numberOfLongtermPictures + pLocalRPL0->numberOfShorttermPictures + pLocalRPL0->numberOfInterLayerPictures ); ii++)
   {
     if (ii <= (originalL0StrpNum + originalL0LtrpNum + originalL0IlrpNum - 1))
@@ -1228,7 +1514,11 @@ void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcList
         refPicIdxL1++;
         numOfSTRPL1 += pLocalRPL0->isLongtermRefPic[ii] ? 0 : 1;
         numOfLTRPL1 += (pLocalRPL0->isLongtermRefPic[ii] && !pLocalRPL0->isInterLayerRefPic[ii]) ? 1 : 0;
+#if ENABLE_SPATIAL_SCALABLE
+        numOfILRPL1 += pLocalRPL0->isInterLayerRefPic[ii] ? 1 : 0;
+#else
         numOfLTRPL1 += pLocalRPL0->isInterLayerRefPic[ii] ? 1 : 0;
+#endif
 
         numOfNeedToFill--;
       }
@@ -1237,14 +1527,199 @@ void Slice::createExplicitReferencePictureSetFromReference(const PicList& rcList
   pLocalRPL1->numberOfLongtermPictures  = numOfLTRPL1;
   pLocalRPL1->numberOfShorttermPictures = numOfSTRPL1;
   pLocalRPL1->numberOfInterLayerPictures = numOfILRPL1;
+#if ENABLE_SPATIAL_SCALABLE
+  numPics = (isIRAP()) ? 0 : numOfLTRPL1 + numOfSTRPL1;
+  pLocalRPL1->numberOfActivePictures = ((isDisallowMixedRefPic) ? numPics : ((numPics < pRPL1->numberOfActivePictures) ? numPics : pRPL1->numberOfActivePictures)) + numOfILRPL1;
+  pLocalRPL1->ltrpInSliceHeader = 1;
+#else
   numPics = numOfLTRPL1 + numOfSTRPL1;
 
   pLocalRPL1->numberOfActivePictures    = (isDisallowMixedRefPic) ? numPics : ((numPics < rplSrc1.numberOfActivePictures) ? numPics : rplSrc1.numberOfActivePictures);
   pLocalRPL1->ltrpInSliceHeader         = rplSrc1.ltrpInSliceHeader;
+#endif
   rplIdx[1] = -1;
   rpl[1]    = pLocalRPL1;
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+bool Slice::xCheckMaxTidILRefPics(int layerIdx, Picture* refPic, bool currentPicIsIRAP)
+{
+  const VPS* vps = refPic->cs->vps;
+  int refLayerIdx = vps == nullptr ? 0 : vps->generalLayerIdx[refPic->layerId];
+  const int maxTidILRefPicsPlus1 = vps->maxTidIlRefPicsPlus1[layerIdx][refLayerIdx];
+
+  // -1 means not set
+  if (maxTidILRefPicsPlus1 < 0)
+  {
+    return true;
+  }
+
+  // 0 allows only IRAP pictures to use inter-layer prediction
+  if (maxTidILRefPicsPlus1 == 0)
+  {
+    return currentPicIsIRAP;
+  }
+
+  // all other cases filter by temporalID
+  return (refPic->TLayer < maxTidILRefPicsPlus1);
+}
+
+void Slice::scaleRefPicList(Picture* scaledRefPic[], PicHeader* picHeader, APS** apss, APS* lmcsAps, APS* scalingListAps, const bool isDecoder)
+{
+  int i;
+
+  bool refPicIsSameRes = false;
+
+  // this is needed for IBC
+  pic->unscaledPic = pic;
+
+  if (sliceType == VVENC_I_SLICE)
+  {
+    return;
+  }
+
+  freeScaledRefPicList(scaledRefPic);
+
+  for (int refList = 0; refList < NUM_REF_PIC_LIST_01; refList++)
+  {
+    if (refList == 1 && sliceType != VVENC_B_SLICE)
+    {
+      continue;
+    }
+
+    for (int rIdx = 0; rIdx < numRefIdx[refList]; rIdx++)
+    {
+      // if rescaling is needed, otherwise just reuse the original picture pointer; it is needed for motion field, otherwise motion field requires a copy as well
+      // reference resampling for the whole picture is not applied at decoder
+
+      int xScale, yScale;
+      CU::getRprScaling(sps, pps, refPicList[refList][rIdx], xScale, yScale);
+      scalingRatio[refList][rIdx] = std::pair<int, int>(xScale, yScale);
+
+      CHECK(refPicList[refList][rIdx]->unscaledPic == nullptr, "unscaledPic is not properly set");
+
+      if (refPicList[refList][rIdx]->isRefScaled(pps) == false)
+      {
+        refPicIsSameRes = true;
+      }
+
+      if (scalingRatio[refList][rIdx] == SCALE_1X || isDecoder)
+      {
+        scaledRefPicList[refList][rIdx] = refPicList[refList][rIdx];
+      }
+      else
+      {
+        int poc = refPicList[refList][rIdx]->getPOC();
+        int layerId = refPicList[refList][rIdx]->layerId;
+
+        // check whether the reference picture has already been scaled
+        for (i = 0; i < MAX_NUM_REF; i++)
+        {
+          if (scaledRefPic[i] != nullptr && scaledRefPic[i]->poc == poc && scaledRefPic[i]->layerId == layerId)
+          {
+            break;
+          }
+        }
+
+        if (i == MAX_NUM_REF)
+        {
+          int j;
+          // search for unused Picture structure in scaledRefPic
+          for (j = 0; j < MAX_NUM_REF; j++)
+          {
+            if (scaledRefPic[j] == nullptr)
+            {
+              break;
+            }
+          }
+
+          CHECK(j >= MAX_NUM_REF, "scaledRefPic can not hold all reference pictures!");
+
+          if (j >= MAX_NUM_REF)
+          {
+            j = 0;
+          }
+
+          if (scaledRefPic[j] == nullptr)
+          {
+            scaledRefPic[j] = new Picture;
+
+            scaledRefPic[j]->isBorderExtended = false;
+            scaledRefPic[j]->isReconstructed = false;
+            scaledRefPic[j]->isReferenced = true;
+
+            scaledRefPic[j]->create(sps->chromaFormatIdc, Size(pps->picWidthInLumaSamples, pps->picHeightInLumaSamples), sps->CTUSize, sps->CTUSize + 16, isDecoder);
+            scaledRefPic[j]->finalInit(*pic->cs->vps, *sps, *pps, picHeader,  *refPicList[refList][rIdx]->shrdUnitCache, refPicList[refList][rIdx]->unitChacheMutex, apss, lmcsAps/*, scalinglistAps*/);
+            scaledRefPic[j]->poc = NOT_VALID;
+          }
+
+          scaledRefPic[j]->poc = poc;
+          scaledRefPic[j]->layerId = layerId;
+          scaledRefPic[j]->isLongTerm = refPicList[refList][rIdx]->isLongTerm;
+          scaledRefPic[j]->isReconstructed = refPicList[refList][rIdx]->isReconstructed ? true : false;
+
+          // rescale the reference picture
+          const bool downsampling = refPicList[refList][rIdx]->getRecoBuf().Y().width >= scaledRefPic[j]->getRecoBuf().Y().width && refPicList[refList][rIdx]->getRecoBuf().Y().height >= scaledRefPic[j]->getRecoBuf().Y().height;
+          Picture::rescalePicture(scalingRatio[refList][rIdx],
+            refPicList[refList][rIdx]->getRecoBuf(), refPicList[refList][rIdx]->slices[0]->pps->scalingWindow,
+            scaledRefPic[j]->getRecoBuf(), pps->scalingWindow,
+            sps->chromaFormatIdc, sps->bitDepths, true, downsampling,
+            sps->horCollocatedChroma, sps->verCollocatedChroma);
+          scaledRefPic[j]->unscaledPic = refPicList[refList][rIdx];
+          scaledRefPic[j]->extendPicBorder();
+
+          scaledRefPicList[refList][rIdx] = scaledRefPic[j];
+        }
+        else
+        {
+          scaledRefPicList[refList][rIdx] = scaledRefPic[i];
+        }
+      }
+    }
+  }
+
+  // make the scaled reference picture list as the default reference picture list
+  for (int refList = 0; refList < NUM_REF_PIC_LIST_01; refList++)
+  {
+    if (refList == 1 && sliceType != VVENC_B_SLICE)
+    {
+      continue;
+    }
+
+    for (int rIdx = 0; rIdx < numRefIdx[refList]; rIdx++)
+    {
+      savedRefPicList[refList][rIdx] = refPicList[refList][rIdx];
+      refPicList[refList][rIdx] = scaledRefPicList[refList][rIdx];
+
+      // allow the access of the unscaled version in xPredInterBlk()
+      refPicList[refList][rIdx]->unscaledPic = savedRefPicList[refList][rIdx];
+    }
+  }
+
+  //Make sure that TMVP is disabled when there are no reference pictures with the same resolution
+  if (!refPicIsSameRes)
+  {
+    CHECK(this->picHeader->enableTMVP != 0, "TMVP cannot be enabled in pictures that have no reference pictures with the same resolution")
+  }
+}
+
+void Slice::freeScaledRefPicList(Picture* scaledRefPic[])
+{
+  if (sliceType == VVENC_I_SLICE)
+  {
+    return;
+  }
+  for (int i = 0; i < MAX_NUM_REF; i++)
+  {
+    if (scaledRefPic[i] != nullptr)
+    {
+      scaledRefPic[i]->destroy( false );
+      delete scaledRefPic[i];
+      scaledRefPic[i] = nullptr;
+    }
+  }
+}
+#endif
 //! get tables for weighted prediction
 void  Slice::getWpScaling( RefPicList e, int iRefIdx, WPScalingParam *&wp ) const
 {
@@ -1290,13 +1765,27 @@ unsigned Slice::getMinPictureDistance() const
     const int currPOC  = poc;
     for (int refIdx = 0; refIdx < numRefIdx[ REF_PIC_LIST_0 ]; refIdx++)
     {
+#if ENABLE_SPATIAL_SCALABLE
+      if (getRefPic(REF_PIC_LIST_0, refIdx)->layerId == nuhLayerId)
+      {
+        minPicDist = std::min(minPicDist, std::abs(currPOC - getRefPic(REF_PIC_LIST_0, refIdx)->getPOC()));
+      }
+#else
       minPicDist = std::min( minPicDist, std::abs(currPOC - getRefPic(REF_PIC_LIST_0, refIdx)->getPOC()));
+#endif
     }
     if( sliceType == VVENC_B_SLICE )
     {
       for (int refIdx = 0; refIdx < numRefIdx[ REF_PIC_LIST_1 ]; refIdx++)
       {
+#if ENABLE_SPATIAL_SCALABLE
+        if (getRefPic(REF_PIC_LIST_1, refIdx)->layerId == nuhLayerId)
+        {
+          minPicDist = std::min(minPicDist, std::abs(currPOC - getRefPic(REF_PIC_LIST_1, refIdx)->getPOC()));
+        }
+#else
         minPicDist = std::min(minPicDist, std::abs(currPOC - getRefPic(REF_PIC_LIST_1, refIdx)->getPOC()));
+#endif
       }
     }
   }
@@ -1926,6 +2415,25 @@ void ReferencePictureList::setRefPicIdentifier(int idx, int identifier, bool isL
 
 bool ReferencePictureList::isPOCInRefPicList( const int poc, const int currPoc ) const
 {
+#if ENABLE_SPATIAL_SCALABLE
+  for (int i = 0; i < numberOfLongtermPictures + numberOfShorttermPictures + numberOfInterLayerPictures; i++)
+  {
+    if (isInterLayerRefPic[i]) {
+      // Diagonal inter-layer prediction is not allowed
+      CHECK(refPicIdentifier[i], "ILRP identifier should be 0");
+
+      if (poc == currPoc)
+      {
+        return true;
+      }
+    }
+    if (isLongtermRefPic[i] ? (poc == refPicIdentifier[i]) : (poc == currPoc - refPicIdentifier[i]))
+    {
+      return true;
+    }
+  }
+  return false;
+#else
   for (int i = 0; i < numberOfLongtermPictures + numberOfShorttermPictures; i++)
   {
     if (isLongtermRefPic[i] ? (poc == refPicIdentifier[i]) : (poc == currPoc - refPicIdentifier[i]) )
@@ -1934,6 +2442,7 @@ bool ReferencePictureList::isPOCInRefPicList( const int poc, const int currPoc )
     }
   }
   return false;
+#endif
 }
 
 
@@ -2140,6 +2649,214 @@ Area PreCalcValues::getCtuArea( const int ctuPosX, const int ctuPosY ) const
 
 void VPS::deriveOutputLayerSets()
 {
+#if ENABLE_SPATIAL_SCALABLE
+  if (eachLayerIsAnOls || olsModeIdc < 2)
+  {
+    totalNumOLSs = maxLayers;
+  }
+  else if (olsModeIdc == 2)
+  {
+    totalNumOLSs = numOutputLayerSets;
+  }
+
+  olsDpbParamsIdx.resize(totalNumOLSs);
+  olsDpbPicSize.resize(totalNumOLSs, Size(0, 0));
+  numOutputLayersInOls.resize(totalNumOLSs);
+  numLayersInOls.resize(totalNumOLSs);
+  outputLayerIdInOls.resize(totalNumOLSs, std::vector<int>(maxLayers, NOT_VALID));
+  numSubLayersInLayerInOLS.resize(totalNumOLSs, std::vector<int>(maxLayers, NOT_VALID));
+  layerIdInOls.resize(totalNumOLSs, std::vector<int>(maxLayers, NOT_VALID));
+  olsDpbChromaFormatIdc.resize(totalNumOLSs);
+  olsDpbBitDepthMinus8.resize(totalNumOLSs);
+
+  std::vector<int> numRefLayers(maxLayers);
+  std::vector<std::vector<int>> outputLayerIdx(totalNumOLSs, std::vector<int>(maxLayers, NOT_VALID));
+  std::vector<std::vector<int>> layerIncludedInOlsFlag(totalNumOLSs, std::vector<int>(maxLayers, 0));
+  std::vector<std::vector<int>> dependencyFlag(maxLayers, std::vector<int>(maxLayers, NOT_VALID));
+  std::vector<std::vector<int>> refLayerIdx(maxLayers, std::vector<int>(maxLayers, NOT_VALID));
+  std::vector<int> layerUsedAsRefLayerFlag(maxLayers, 0);
+  std::vector<int> layerUsedAsOutputLayerFlag(maxLayers, NOT_VALID);
+
+  for (int i = 0; i < maxLayers; i++)
+  {
+    int r = 0;
+
+    for (int j = 0; j < maxLayers; j++)
+    {
+      dependencyFlag[i][j] = directRefLayer[i][j];
+
+      for (int k = 0; k < i; k++)
+      {
+        if (directRefLayer[i][k] && dependencyFlag[k][j])
+        {
+          dependencyFlag[i][j] = 1;
+        }
+      }
+      if (directRefLayer[i][j])
+      {
+        layerUsedAsRefLayerFlag[j] = 1;
+      }
+
+      if (dependencyFlag[i][j])
+      {
+        refLayerIdx[i][r++] = j;
+      }
+    }
+
+    numRefLayers[i] = r;
+  }
+
+  numOutputLayersInOls[0] = 1;
+  outputLayerIdInOls[0][0] = layerId[0];
+  numSubLayersInLayerInOLS[0][0] = ptlMaxTemporalId[olsPtlIdx[0]] + 1;
+  layerUsedAsOutputLayerFlag[0] = 1;
+  for (int i = 1; i < maxLayers; i++)
+  {
+    if (eachLayerIsAnOls || olsModeIdc < 2)
+    {
+      layerUsedAsOutputLayerFlag[i] = 1;
+    }
+    else
+    {
+      layerUsedAsOutputLayerFlag[i] = 0;
+    }
+  }
+  for (int i = 1; i < totalNumOLSs; i++)
+  {
+    if (eachLayerIsAnOls || olsModeIdc == 0)
+    {
+      numOutputLayersInOls[i] = 1;
+      outputLayerIdInOls[i][0] = layerId[i];
+      if (eachLayerIsAnOls)
+      {
+        numSubLayersInLayerInOLS[i][0] = ptlMaxTemporalId[olsPtlIdx[i]] + 1;
+      }
+      else
+      {
+        numSubLayersInLayerInOLS[i][i] = ptlMaxTemporalId[olsPtlIdx[i]] + 1;
+        for (int k = i - 1; k >= 0; k--)
+        {
+          numSubLayersInLayerInOLS[i][k] = 0;
+          for (int m = k + 1; m <= i; m++)
+          {
+            uint32_t maxSublayerNeeded = std::min((uint8_t)numSubLayersInLayerInOLS[i][m], maxTidIlRefPicsPlus1[m][k]);
+            if (directRefLayer[m][k] && numSubLayersInLayerInOLS[i][k] < maxSublayerNeeded)
+            {
+              numSubLayersInLayerInOLS[i][k] = maxSublayerNeeded;
+            }
+          }
+        }
+      }
+    }
+    else if (olsModeIdc == 1)
+    {
+      numOutputLayersInOls[i] = i + 1;
+
+      for (int j = 0; j < numOutputLayersInOls[i]; j++)
+      {
+        outputLayerIdInOls[i][j] = layerId[j];
+        numSubLayersInLayerInOLS[i][j] = ptlMaxTemporalId[olsPtlIdx[i]] + 1;
+      }
+    }
+    else if (olsModeIdc == 2)
+    {
+      int j = 0;
+      int highestIncludedLayer = 0;
+      for (j = 0; j < maxLayers; j++)
+      {
+        numSubLayersInLayerInOLS[i][j] = 0;
+      }
+      j = 0;
+      for (int k = 0; k < maxLayers; k++)
+      {
+        if (olsOutputLayer[i][k])
+        {
+          layerIncludedInOlsFlag[i][k] = 1;
+          highestIncludedLayer = k;
+          layerUsedAsOutputLayerFlag[k] = 1;
+          outputLayerIdx[i][j] = k;
+          outputLayerIdInOls[i][j++] = layerId[k];
+          numSubLayersInLayerInOLS[i][k] = ptlMaxTemporalId[olsPtlIdx[i]] + 1;
+        }
+      }
+      numOutputLayersInOls[i] = j;
+
+      for (j = 0; j < numOutputLayersInOls[i]; j++)
+      {
+        int idx = outputLayerIdx[i][j];
+        for (int k = 0; k < numRefLayers[idx]; k++)
+        {
+          layerIncludedInOlsFlag[i][refLayerIdx[idx][k]] = 1;
+        }
+      }
+      for (int k = highestIncludedLayer - 1; k >= 0; k--)
+      {
+        if (layerIncludedInOlsFlag[i][k] && !olsOutputLayer[i][k])
+        {
+          for (int m = k + 1; m <= highestIncludedLayer; m++)
+          {
+            uint32_t maxSublayerNeeded = std::min((uint8_t)numSubLayersInLayerInOLS[i][m], maxTidIlRefPicsPlus1[m][k]);
+            if (directRefLayer[m][k] && layerIncludedInOlsFlag[i][m] && numSubLayersInLayerInOLS[i][k] < maxSublayerNeeded)
+            {
+              numSubLayersInLayerInOLS[i][k] = maxSublayerNeeded;
+            }
+          }
+        }
+      }
+    }
+  }
+  for (int i = 0; i < maxLayers; i++)
+  {
+    CHECK(layerUsedAsRefLayerFlag[i] == 0 && layerUsedAsOutputLayerFlag[i] == 0, "There shall be no layer that is neither an output layer nor a direct reference layer");
+  }
+
+  numLayersInOls[0] = 1;
+  layerIdInOls[0][0] = layerId[0];
+  numMultiLayeredOlss = 0;
+  for (int i = 1; i < totalNumOLSs; i++)
+  {
+    if (eachLayerIsAnOls)
+    {
+      numLayersInOls[i] = 1;
+      layerIdInOls[i][0] = layerId[i];
+    }
+    else if (olsModeIdc == 0 || olsModeIdc == 1)
+    {
+      numLayersInOls[i] = i + 1;
+      for (int j = 0; j < numLayersInOls[i]; j++)
+      {
+        layerIdInOls[i][j] = layerId[j];
+      }
+    }
+    else if (olsModeIdc == 2)
+    {
+      int j = 0;
+      for (int k = 0; k < maxLayers; k++)
+      {
+        if (layerIncludedInOlsFlag[i][k])
+        {
+          layerIdInOls[i][j++] = layerId[k];
+        }
+      }
+
+      numLayersInOls[i] = j;
+    }
+    if (numLayersInOls[i] > 1)
+    {
+      multiLayerOlsIdx[i] = numMultiLayeredOlss;
+      numMultiLayeredOlss++;
+    }
+  }
+  multiLayerOlsIdxToOlsIdx.resize(numMultiLayeredOlss);
+
+  for (int i = 0, j = 0; i < totalNumOLSs; i++)
+  {
+    if (numLayersInOls[i] > 1)
+    {
+      multiLayerOlsIdxToOlsIdx[j++] = i;
+    }
+  }
+#else
   if( maxLayers == 1 )
   {
     totalNumOLSs = 1;
@@ -2267,8 +2984,46 @@ void VPS::deriveOutputLayerSets()
       numLayersInOls[i] = j;
     }
   }
+#endif
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+void VPS::checkVPS()
+{
+  for (int multiLayerOlsIdx = 0; multiLayerOlsIdx < numMultiLayeredOlss; multiLayerOlsIdx++)
+  {
+    const int olsIdx = multiLayerOlsIdxToOlsIdx[multiLayerOlsIdx];
+    const int olsTimingHrdIdx = olsHrdIdx[multiLayerOlsIdx];
+    const int _olsPtlIdx = olsPtlIdx[olsIdx];
+    CHECK(hrdMaxTid[olsTimingHrdIdx] < ptlMaxTemporalId[_olsPtlIdx], "The value of vps_hrd_max_tid[vps_ols_timing_hrd_idx[m]] shall be greater than or equal to "
+      "vps_ptl_max_tid[ vps_ols_ptl_idx[n]] for each m-th multi-layer OLS for m from 0 to "
+      "NumMultiLayerOlss - 1, inclusive, and n being the OLS index of the m-th multi-layer OLS among all OLSs.");
+    const int _olsDpbParamsIdx = olsDpbParamsIdx[olsIdx];
+    CHECK(dpbMaxTemporalId[_olsDpbParamsIdx] < ptlMaxTemporalId[_olsPtlIdx], "The value of vps_dpb_max_tid[vps_ols_dpb_params_idx[m]] shall be greater than or equal to "
+      "vps_ptl_max_tid[ vps_ols_ptl_idx[n]] for each m-th multi-layer OLS for m from 0 to "
+      "NumMultiLayerOlss - 1, inclusive, and n being the OLS index of the m-th multi-layer OLS among all OLSs.");
+  }
+}
+#endif
+
+#if ENABLE_SPATIAL_SCALABLE
+void VPS::deriveTargetOutputLayerSet(int _targetOlsIdx)
+{
+  targetOlsIdx = _targetOlsIdx < 0 ? maxLayers - 1 : _targetOlsIdx;
+  targetOutputLayerIdSet.clear();
+  targetLayerIdSet.clear();
+
+  for (int i = 0; i < numOutputLayersInOls[targetOlsIdx]; i++)
+  {
+    targetOutputLayerIdSet.push_back(outputLayerIdInOls[targetOlsIdx][i]);
+  }
+
+  for (int i = 0; i < numLayersInOls[targetOlsIdx]; i++)
+  {
+    targetLayerIdSet.push_back(layerIdInOls[targetOlsIdx][i]);
+  }
+}
+#endif
 } // namespace vvenc
 
 //! \}

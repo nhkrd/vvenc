@@ -481,6 +481,10 @@ static constexpr int CSCALE_FP_PREC =                                11;
 static constexpr int MCTF_PADDING         = 128;
 
 static constexpr int SCALE_RATIO_BITS =                              14;
+#if ENABLE_SPATIAL_SCALABLE
+static const int MAX_SCALING_RATIO =                                  8;  // max scaling ratio allowed in the software, it is used to allocated an internla buffer in the rescaling
+static const std::pair<int, int> SCALE_1X = std::pair<int, int>( 1 << SCALE_RATIO_BITS, 1 << SCALE_RATIO_BITS );  // scale ratio 1x
+#endif
 static constexpr int DELTA_QP_ACT[4] =                  { -5, 1, 3, 1 };
 
 static constexpr uint32_t CCALF_CANDS_COEFF_NR = 8;

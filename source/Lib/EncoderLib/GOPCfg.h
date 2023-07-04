@@ -118,7 +118,11 @@ class GOPCfg
     void initGopList( int refreshType, int intraPeriod, int gopSize, bool bPicReordering, const vvencGOPEntry cfgGopList[ VVENC_MAX_GOP ], const vvencMCTF& mctfCfg );
     void getNextGopEntry( GOPEntry& gopEntry );
     void correctIncompleteLastGop( std::list<PicShared*>& picSharedList ) const;
+#if ENABLE_SPATIAL_SCALABLE
+    void getDefaultRPLLists( RPLList& rpl0, RPLList& rpl1, bool _interLayerPresent ) const;
+#else
     void getDefaultRPLLists( RPLList& rpl0, RPLList& rpl1 ) const;
+#endif
 
     int  getMaxTLayer() const                             { return m_maxTid; }
     const std::vector<int>& getMaxDecPicBuffering() const { return m_maxDecPicBuffering; }

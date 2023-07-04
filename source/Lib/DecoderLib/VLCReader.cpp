@@ -1048,7 +1048,11 @@ void HLSyntaxReader::dpb_parameters(int maxSubLayersMinus1, bool subLayerInfoFla
   uint32_t code;
   for (int i = (subLayerInfoFlag ? 0 : maxSubLayersMinus1); i <= maxSubLayersMinus1; i++)
   {
+#if DPB_MAX_DEC_PIC_BUFFERING_BUG_FIX
+    READ_UVLC(code, "dpb_max_dec_pic_buffering_minus1[i]"); pcSPS->maxDecPicBuffering[i] = code + 1;
+#else
     READ_UVLC(pcSPS->maxDecPicBuffering[i], "dpb_max_dec_pic_buffering_minus1[i]");
+#endif
     READ_UVLC(code,      "dpb_max_num_reorder_pics[i]"); pcSPS->numReorderPics[i] = code;
     READ_UVLC(pcSPS->maxLatencyIncreasePlus1[i], "dpb_max_latency_increase_plus1[i]");
   }

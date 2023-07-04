@@ -233,7 +233,11 @@ int main( int argc, char* argv[] )
     return -1;
   }
 
+#if ENABLE_SPATIAL_SCALABLE
+  int iRet = vvenc_encoder_open( enc, &vvenccfg, nullptr, 0 );
+#else
   int iRet = vvenc_encoder_open( enc, &vvenccfg );
+#endif
   if( 0 != iRet )
   {
     printVVEncErrorMsg( "vvencapp cannot create encoder", iRet, vvenc_get_last_error( enc ) );

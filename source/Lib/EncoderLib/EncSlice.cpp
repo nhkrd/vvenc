@@ -405,6 +405,14 @@ int EncSlice::xGetQPForPicture( const Slice* slice )
     }
     else
     {
+#if ENABLE_SPATIAL_SCALABLE
+      if (slice->nalUnitType == VVENC_NAL_UNIT_CODED_SLICE_IDR_N_LP || slice->nalUnitType == VVENC_NAL_UNIT_CODED_SLICE_CRA)
+      {
+        qp += m_pcEncCfg->m_intraQPOffset;
+      }
+      else
+      {
+#endif
       if ( ! ( qp == -lumaQpBDOffset ) )
       {
         const GOPEntry &gopEntry = *(slice->pic->gopEntry);
@@ -416,6 +424,9 @@ int EncSlice::xGetQPForPicture( const Slice* slice )
         int qpOffset = (int)floor( Clip3<double>( 0.0, 3.0, dqpOffset ) );
         qp += qpOffset ;
       }
+#if ENABLE_SPATIAL_SCALABLE
+      }
+#endif
     }
   }
   qp = Clip3( -lumaQpBDOffset, MAX_QP, qp );

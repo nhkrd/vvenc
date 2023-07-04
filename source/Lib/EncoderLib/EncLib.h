@@ -49,6 +49,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "EncStage.h"
 #include "CommonLib/MCTF.h"
 #include "vvenc/vvencCfg.h"
+#if ENABLE_SPATIAL_SCALABLE
+#include "EncLibCommon.h"
+#endif
 
 #include <mutex>
 
@@ -100,12 +103,26 @@ private:
   std::condition_variable    m_stagesCond;
   std::deque<AccessUnitList> m_AuList;
 
+#if ENABLE_SPATIAL_SCALABLE
+  EncLibCommon&              m_encLibCommon;
+  int                        m_layerId;
+#endif
+
 public:
+#if ENABLE_SPATIAL_SCALABLE
+  EncLib( MsgLog& logger, EncLibCommon& encLibCommon );
+#else
   EncLib( MsgLog& logger );
+#endif
   virtual ~EncLib();
 
   void     setRecYUVBufferCallback( void* ctx, vvencRecYUVBufferCallback func );
+#if ENABLE_SPATIAL_SCALABLE
+  void     initEncoderLib      ( const vvenc_config& encCfg, int layerId = 0 );
+  void     checkChromaFormatAndBitDepth( const std::vector<EncLib*>& encs );
+#else
   void     initEncoderLib      ( const vvenc_config& encCfg );
+#endif
   void     initPass            ( int pass, const char* statsFName );
   void     encodePicture       ( bool flush, const vvencYUVBuffer* yuvInBuf, AccessUnitList& au, bool& isQueueEmpty );
   void     uninitEncoderLib    ();
@@ -117,7 +134,11 @@ private:
   void     xUninitLib          ();
   void     xInitRCCfg          ();
 
+#if ENABLE_SPATIAL_SCALABLE
+  PicShared* xGetFreePicShared( int layerId );
+#else
   PicShared* xGetFreePicShared();
+#endif
   void     xAssignPrevQpaBufs( PicShared* picShared );
 
   void     xDetectScc          ( PicShared* picShared );

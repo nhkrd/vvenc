@@ -67,6 +67,9 @@ void msgApp( int level, const char* fmt, ... );
 // ====================================================================================================================
 
 typedef struct vvencEncApp vvencEncApp;
+#if ENABLE_SPATIAL_SCALABLE
+typedef struct vvencEncLibCommon vvencEncLibCommon;
+#endif
 //extern vvencEncApp *g_vvencEncApp;
 
 
@@ -85,11 +88,38 @@ private:
   vvencEncoder         *m_encCtx;                         ///< encoder library class
   apputils::YuvFileIO   m_yuvInputFile;                   ///< input YUV file
   apputils::YuvFileIO   m_yuvReconFile;                   ///< output YUV reconstruction file
+#if ENABLE_SPATIAL_SCALABLE
+  std::fstream&         m_bitstream;                      ///< output bitstream file
+#else
   std::fstream          m_bitstream;                      ///< output bitstream file
+#endif
   unsigned              m_essentialBytes;
   unsigned              m_totalBytes;
+#if ENABLE_SPATIAL_SCALABLE
+  vvencEncLibCommon     *m_encLibCommonCtx;
+  vvencYUVBuffer        m_yuvInBuf;
+  vvencAccessUnit       m_au;
+  int                   m_framesRcvd;
+  int                   m_layerIdx;
+#endif
 
 public:
+#if ENABLE_SPATIAL_SCALABLE
+  EncApp(std::fstream& bitstream, vvencEncLibCommon* encLibCommon = NULL) 
+    : m_encCtx(NULL)
+    , m_bitstream(bitstream)
+    , m_essentialBytes(0)
+    , m_totalBytes(0)
+    , m_encLibCommonCtx(encLibCommon)
+    , m_framesRcvd(0)
+    , m_layerIdx(0)
+  {
+    vvenc_config_default(&m_vvenc_config);
+    m_cEncAppCfg.setPresetChangeCallback(changePreset);
+    memset(&m_yuvInBuf, 0, sizeof(m_yuvInBuf));
+    memset(&m_au, 0, sizeof(m_au));
+  }
+#else
   EncApp()
     : m_essentialBytes( 0 )
     , m_totalBytes    ( 0 )
@@ -99,15 +129,30 @@ public:
     m_cEncAppCfg.setPresetChangeCallback(changePreset);
 
   }
+#endif
 
   virtual ~EncApp()
   {
   }
 
   bool  parseCfg( int argc, char* argv[] );           ///< parse configuration file to fill member variables
+#if ENABLE_SPATIAL_SCALABLE
+  int   encode(bool& inputDone, bool& encDone);       ///< main encoding function
+#endif
   int   encode();                                     ///< main encoding function
   void  outputAU ( const vvencAccessUnit& au );            ///< write encoded access units to bitstream
   static void outputYuv( void*, vvencYUVBuffer* );      ///< write reconstructed yuv output
+#if ENABLE_SPATIAL_SCALABLE
+  bool  isDecode();
+  int   decode();
+  int   createLib(int layerIdx);
+  int   check(const std::vector<EncApp*>& encApps);
+  int   initPass(int pass);
+  void  closeYuvInputFile();
+  void  destroy();
+  int   getMaxLayers() const { return m_vvenc_config.m_maxLayers; }
+  int   getRCNumPasses() const { return m_vvenc_config.m_RCNumPasses; }
+#endif
 
   bool isShowVersionHelp()
   {

@@ -172,6 +172,55 @@ VVENC_DECL void vvenc_accessUnit_default(vvencAccessUnit *accessUnit )
   vvenc_accessUnit_reset( accessUnit );
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+VVENC_DECL vvencEncLibCommon* vvenc_enclibcommon_create()
+{
+  vvenc::EncLibCommon* encLibCommonCtx = new vvenc::EncLibCommon();
+  encLibCommonCtx->stages.resize(vvenc::EncLibCommonStageIndex::NUM_INDEXS);
+  if (!encLibCommonCtx)
+  {
+    return nullptr;
+  }
+
+  return (vvencEncLibCommon*)encLibCommonCtx;
+}
+
+VVENC_DECL int vvenc_enclibcommon_close(vvencEncLibCommon* encLibCommon)
+{
+  auto d = (vvenc::EncLibCommon*)encLibCommon;
+  if (!d)
+  {
+    return VVENC_ERR_INITIALIZE;
+  }
+
+  delete d;
+
+  return VVENC_OK;
+}
+
+VVENC_DECL int vvenc_enclibcommon_reset(vvencEncLibCommon* encLibCommon)
+{
+  auto d = (vvenc::EncLibCommon*)encLibCommon;
+  if (!d)
+  {
+    return VVENC_ERR_INITIALIZE;
+  }
+
+  d->stages.clear();
+  d->stages.resize(vvenc::EncLibCommonStageIndex::NUM_INDEXS);
+
+  return VVENC_OK;
+}
+
+VVENC_DECL int vvenc_encoder_check(vvencEncoder* enc, const void* encs)
+{
+  auto d = (vvenc::VVEncImpl*)enc;
+  auto e = (const std::vector<vvencEncoder*>*)encs;
+  return d->checkChromaFormatAndBitDepth(*e);
+}
+
+#endif
+
 VVENC_DECL vvencEncoder* vvenc_encoder_create()
 {
   vvenc::VVEncImpl* encCtx = new vvenc::VVEncImpl();
@@ -184,7 +233,11 @@ VVENC_DECL vvencEncoder* vvenc_encoder_create()
 }
 
 
+#if ENABLE_SPATIAL_SCALABLE
+VVENC_DECL int vvenc_encoder_open(vvencEncoder* enc, vvenc_config* config, vvencEncLibCommon* encLibCommon, int layerId)
+#else
 VVENC_DECL int vvenc_encoder_open( vvencEncoder *enc, vvenc_config* config )
+#endif
 {
   auto e = (vvenc::VVEncImpl*)enc;
   if (!e)
@@ -192,7 +245,11 @@ VVENC_DECL int vvenc_encoder_open( vvencEncoder *enc, vvenc_config* config )
     return VVENC_ERR_INITIALIZE;
   }
 
+#if ENABLE_SPATIAL_SCALABLE
+  int ret = e->init( config, *(vvenc::EncLibCommon*)encLibCommon, layerId );
+#else
   int ret = e->init( config );
+#endif
   if (ret != 0)
   {
     // Error initializing the decoder
@@ -239,8 +296,7 @@ VVENC_DECL int vvenc_init_pass( vvencEncoder *enc, int pass, const char * statsF
   return e->initPass( pass, statsFName );
 }
 
-
-VVENC_DECL int vvenc_encode( vvencEncoder *enc, vvencYUVBuffer* YUVBuffer, vvencAccessUnit* accessUnit, bool* encodeDone )
+VVENC_DECL int vvenc_encode( vvencEncoder *enc, vvencYUVBuffer* YUVBuffer, vvencAccessUnit* accessUnit, bool* encodeDone)
 {
   auto e = (vvenc::VVEncImpl*)enc;
   if (!e)

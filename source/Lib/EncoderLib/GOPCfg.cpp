@@ -284,7 +284,11 @@ void GOPCfg::correctIncompleteLastGop( std::list<PicShared*>& picSharedList ) co
   }
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+void GOPCfg::getDefaultRPLLists( RPLList& rpl0, RPLList& rpl1, bool _interLayerPresent ) const
+#else
 void GOPCfg::getDefaultRPLLists( RPLList& rpl0, RPLList& rpl1 ) const
+#endif
 {
   const int numRpl = (int)m_defaultRPLList.size();
   // TODO (jb): check size + 1, fix getNumRPL() as well
@@ -294,6 +298,10 @@ void GOPCfg::getDefaultRPLLists( RPLList& rpl0, RPLList& rpl1 ) const
   {
     rpl0[ i ].initFromGopEntry( *m_defaultRPLList[ i ], 0 );
     rpl1[ i ].initFromGopEntry( *m_defaultRPLList[ i ], 1 );
+#if ENABLE_SPATIAL_SCALABLE
+    rpl0[ i ].interLayerPresent = _interLayerPresent;
+    rpl1[ i ].interLayerPresent = _interLayerPresent;
+#endif
   }
 }
 
@@ -923,8 +931,13 @@ void GOPCfg::xSetDBPConstraints( std::vector<GOPEntryList>& defaultLists )
 
   m_maxTid = xGetMaxTid( gopList );
 
+#if ENABLE_SPATIAL_SCALABLE
+  m_maxDecPicBuffering.resize( VVENC_MAX_TLAYER, 1 );
+  m_numReorderPics.resize    ( VVENC_MAX_TLAYER, 0 );
+#else
   m_maxDecPicBuffering.resize( m_maxTid + 1, 1 );
   m_numReorderPics.resize    ( m_maxTid + 1, 0 );
+#endif
 
   // max DPB size and number reorder pics per temporal level
   for( const auto& gopEntry : gopList )
@@ -937,6 +950,32 @@ void GOPCfg::xSetDBPConstraints( std::vector<GOPEntryList>& defaultLists )
   }
 
   // the value of num_reorder_pics[ i ] shall be in the range of 0 to max_dec_pic_buffering[ i ] - 1, inclusive
+#if ENABLE_SPATIAL_SCALABLE
+  for (int i = 0; i < VVENC_MAX_TLAYER - 1; i++)
+  {
+    // a lower layer can not have higher value of m_maxNumReorderPics than a higher layer
+    if (m_numReorderPics[i + 1] < m_numReorderPics[i])
+    {
+      m_numReorderPics[i + 1] = m_numReorderPics[i];
+    }
+    // the value of dpb_max_num_reorder_pics[ i ] shall be in the range of 0 to max_dec_pic_buffering[ i ] - 1, inclusive
+    if (m_numReorderPics[i] > m_maxDecPicBuffering[i] - 1)
+    {
+      m_maxDecPicBuffering[i] = m_numReorderPics[i] + 1;
+    }
+    // a lower layer can not have higher value of m_maxDecPicBuffering than a higher layer
+    if (m_maxDecPicBuffering[i + 1] < m_maxDecPicBuffering[i])
+    {
+      m_maxDecPicBuffering[i + 1] = m_maxDecPicBuffering[i];
+    }
+  }
+
+  // the value of dpb_max_num_reorder_pics[ i ] shall be in the range of 0 to max_dec_pic_buffering[ i ] -  1, inclusive
+  if (m_numReorderPics[VVENC_MAX_TLAYER - 1] > m_maxDecPicBuffering[VVENC_MAX_TLAYER - 1] - 1)
+  {
+    m_maxDecPicBuffering[VVENC_MAX_TLAYER - 1] = m_numReorderPics[VVENC_MAX_TLAYER - 1] + 1;
+  }
+#else
   m_maxDecPicBuffering[ 0 ] = std::max( m_maxDecPicBuffering[ 0 ], m_numReorderPics[ 0 ] +1 );
   for( int tid = 1; tid < m_maxTid; tid++ )
   {
@@ -947,6 +986,7 @@ void GOPCfg::xSetDBPConstraints( std::vector<GOPEntryList>& defaultLists )
     // a lower layer can not have higher DPB size value than a higher layer
     m_maxDecPicBuffering[ tid ] = std::max( m_maxDecPicBuffering[ tid ], m_maxDecPicBuffering[ tid - 1 ] );
   }
+#endif
 }
 
 bool GOPCfg::xCheckDBPConstraints( const GOPEntryList& gopList ) const

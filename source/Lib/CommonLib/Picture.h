@@ -168,6 +168,7 @@ struct Picture : public UnitArea
   const CPelUnitBuf getOrigBufPrev(const PrevFrameType type) const;
   const CPelBuf     getOrigBufPrev(const ComponentID compID, const PrevFrameType type) const;
 
+
 private:
          PelUnitBuf getPicBuf(                          const PictureType type)         { return m_picBufs[ type ]; }
   const CPelUnitBuf getPicBuf(                          const PictureType type)   const { return m_picBufs[ type ]; }
@@ -259,6 +260,13 @@ public:
   std::vector<short>            m_alfCtbFilterIndex;
   std::vector<uint8_t>          m_alfCtuAlternative[ MAX_NUM_COMP ];
 
+#if ENABLE_SPATIAL_SCALABLE
+  Picture*                      unscaledPic;
+  Window                        scalingWindow;
+  XUCache*                      shrdUnitCache;
+  std::mutex*                   unitChacheMutex;
+#endif
+
 public:
   Slice*          allocateNewSlice();
   Slice*          swapSliceObject( Slice* p, uint32_t i );
@@ -268,6 +276,27 @@ public:
   void            copySAO   (const Picture& src, int dstid)  { std::copy(src.m_sao[0].begin(), src.m_sao[0].end(), m_sao[dstid].begin()); }
 
   void            resizeAlfCtuBuffers( int numEntries );
+
+#if ENABLE_SPATIAL_SCALABLE
+  bool            isRefScaled(const PPS* pps) const { return  unscaledPic->lwidth()         != pps->picWidthInLumaSamples        ||
+                                                              unscaledPic->lheight()        != pps->picHeightInLumaSamples       ||
+                                                              scalingWindow.winLeftOffset   != pps->scalingWindow.winLeftOffset  ||
+                                                              scalingWindow.winRightOffset  != pps->scalingWindow.winRightOffset ||
+                                                              scalingWindow.winTopOffset    != pps->scalingWindow.winTopOffset   ||
+                                                              scalingWindow.winBottomOffset != pps->scalingWindow.winBottomOffset; }
+  static void     sampleRateConv(const std::pair<int, int> scalingRatio, const std::pair<int, int> compScale,
+                                 const CPelBuf& beforeScale, const int beforeScaleLeftOffset, const int beforeScaleTopOffset,
+                                 const PelBuf& afterScale, const int afterScaleLeftOffset, const int afterScaleTopOffset,
+                                 const int bitDepth, const bool useLumaFilter, const bool downsampling,
+                                 const bool horCollocatedPositionFlag, const bool verCollocatedPositionFlag);
+
+  static void     rescalePicture(const std::pair<int, int> scalingRatio,
+                                 const CPelUnitBuf& beforeScaling, const Window& scalingWindowBefore,
+                                 const PelUnitBuf& afterScaling, const Window& scalingWindowAfter,
+                                 const ChromaFormat chromaFormatIDC, const BitDepths& bitDepths, const bool useLumaFilter, const bool downsampling,
+                                 const bool horCollocatedChromaFlag, const bool verCollocatedChromaFlag);
+#endif
+
 };
 
 int calcAndPrintHashStatus(const CPelUnitBuf& pic, const SEIDecodedPictureHash* pictureHashSEI, const BitDepths &bitDepths, const vvencMsgLevel msgl, MsgLog& logger );

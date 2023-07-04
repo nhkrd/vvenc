@@ -50,6 +50,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/CommonDef.h"
 #include "CommonLib/TimeProfiler.h"
 #include "CommonLib/Rom.h"
+#if ENABLE_SPATIAL_SCALABLE
+#include "CommonLib/ProfileLevelTier.h"
+#include "EncLibCommon.h"
+#endif
 #include "Utilities/NoMallocThreadPool.h"
 #include "Utilities/MsgLog.h"
 #include "GOPCfg.h"
@@ -64,7 +68,11 @@ namespace vvenc {
 // Constructor / destructor / create / destroy
 // ====================================================================================================================
 
+#if ENABLE_SPATIAL_SCALABLE
+EncLib::EncLib( MsgLog& logger, EncLibCommon& encLibCommon )
+#else
 EncLib::EncLib( MsgLog& logger )
+#endif
   : msg             ( logger )
   , m_recYuvBufFunc  ( nullptr )
   , m_recYuvBufCtx   ( nullptr )
@@ -83,6 +91,9 @@ EncLib::EncLib( MsgLog& logger )
   , m_maxNumPicShared( MAX_INT )
   , m_accessUnitOutputStarted( false )
   , m_firstFlushDone ( false )
+#if ENABLE_SPATIAL_SCALABLE
+  , m_encLibCommon   ( encLibCommon )
+#endif
 {
 }
 
@@ -105,8 +116,16 @@ void EncLib::setRecYUVBufferCallback( void* ctx, vvencRecYUVBufferCallback func 
   }
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+void EncLib::initEncoderLib( const vvenc_config& encCfg, int layerId )
+#else
 void EncLib::initEncoderLib( const vvenc_config& encCfg )
+#endif
 {
+#if ENABLE_SPATIAL_SCALABLE
+  m_layerId = layerId;
+#endif
+
   // copy config parameter
   const_cast<VVEncCfg&>(m_encCfg) = encCfg;
 
@@ -175,6 +194,29 @@ void EncLib::uninitEncoderLib()
   xUninitLib();
 }
 
+#if ENABLE_SPATIAL_SCALABLE
+void EncLib::checkChromaFormatAndBitDepth(const std::vector<EncLib*>& encs)
+{
+  const VPS* vps = &encs[0]->m_encLibCommon.stages[EncLibCommonStageIndex::ENCODE].getVPS();
+  //check chroma format and bit-depth for dependent layers
+  size_t layerIdx = encs.size();
+  for (uint32_t i = 0; i < layerIdx; i++)
+  {
+    int curLayerChromaFormatIdc = encs[i]->m_encCfg.m_internChromaFormat;
+    int curLayerBitDepth = encs[i]->m_encCfg.m_internalBitDepth[CH_L];
+    for (uint32_t j = 0; j < layerIdx; j++)
+    {
+      if (vps->directRefLayer[i][j])
+      {
+        int refLayerChromaFormatIdcInVPS = encs[j]->m_encCfg.m_internChromaFormat;
+        CHECK(curLayerChromaFormatIdc != refLayerChromaFormatIdcInVPS, "The chroma formats of the current layer and the reference layer are different");
+        int refLayerBitDepthInVPS = encs[j]->m_encCfg.m_internalBitDepth[CH_L];
+        CHECK(curLayerBitDepth != refLayerBitDepthInVPS, "The bit-depth of the current layer and the reference layer are different");
+      }
+    }
+  }
+}
+#endif
 void EncLib::initPass( int pass, const char* statsFName )
 {
   CHECK( m_passInitialized != pass && m_passInitialized + 1 != pass, "initialization of passes only in successive order possible" );
@@ -241,21 +283,41 @@ void EncLib::initPass( int pass, const char* statsFName )
   // pre analysis encoder
   if( m_encCfg.m_LookAhead )
   {
+#if ENABLE_SPATIAL_SCALABLE
+    m_preEncoder = new EncGOP( msg, m_encLibCommon.stages[EncLibCommonStageIndex::PRE_ANALYZE], m_layerId );
+    const int minQueueSize = m_firstPassCfg.m_GOPSize * m_encCfg.m_maxLayers + 1;
+    m_preEncoder->initStage( minQueueSize, true, false, false, m_firstPassCfg.m_CTUSize, false, &m_encLibCommon.stages[EncLibCommonStageIndex::PRE_ANALYZE].getPictureBuffer());
+#else
     m_preEncoder = new EncGOP( msg );
     const int minQueueSize = m_firstPassCfg.m_GOPSize + 1;
     m_preEncoder->initStage( minQueueSize, true, false, false, m_firstPassCfg.m_CTUSize, false );
+#endif
     m_preEncoder->init( m_firstPassCfg, m_gopCfg, *m_rateCtrl, m_threadPool, true );
     m_encStages.push_back( m_preEncoder );
+#if ENABLE_SPATIAL_SCALABLE
+    m_maxNumPicShared += minQueueSize + Log2(m_firstPassCfg.m_GOPSize) + 2;
+#else
     m_maxNumPicShared += minQueueSize;
+#endif
   }
 
   // gop encoder
+#if ENABLE_SPATIAL_SCALABLE
+  m_gopEncoder = new EncGOP( msg, m_encLibCommon.stages[EncLibCommonStageIndex::ENCODE], m_layerId );
+  const int minQueueSize = m_encCfg.m_GOPSize * m_encCfg.m_maxLayers + 1;
+  m_gopEncoder->initStage( minQueueSize, false, false, false, m_encCfg.m_CTUSize, m_encCfg.m_stageParallelProc , &m_encLibCommon.stages[EncLibCommonStageIndex::ENCODE].getPictureBuffer() );
+#else
   m_gopEncoder = new EncGOP( msg );
   const int minQueueSize = m_encCfg.m_GOPSize + 1;
   m_gopEncoder->initStage( minQueueSize, false, false, false, m_encCfg.m_CTUSize, m_encCfg.m_stageParallelProc );
+#endif
   m_gopEncoder->init( m_encCfg, m_gopCfg, *m_rateCtrl, m_threadPool, false );
   m_encStages.push_back( m_gopEncoder );
+#if ENABLE_SPATIAL_SCALABLE
+  m_maxNumPicShared += minQueueSize + Log2(m_encCfg.m_GOPSize) + 2;
+#else
   m_maxNumPicShared += minQueueSize;
+#endif
 
   // additional pictures due to structural delay
   m_maxNumPicShared += m_gopCfg->getNumReorderPics()[ m_encCfg.m_maxTLayer ];
@@ -375,7 +437,6 @@ void EncLib::xInitRCCfg()
 // ====================================================================================================================
 // Public member functions
 // ====================================================================================================================
-
 void EncLib::encodePicture( bool flush, const vvencYUVBuffer* yuvInBuf, AccessUnitList& au, bool& isQueueEmpty )
 {
   PROFILER_ACCUM_AND_START_NEW_SET( 1, g_timeProfiler, P_TOP_LEVEL );
@@ -398,15 +459,28 @@ void EncLib::encodePicture( bool flush, const vvencYUVBuffer* yuvInBuf, AccessUn
 
   PicShared* picShared = nullptr;
   bool inputPending    = ( yuvInBuf != nullptr );
+#if ENABLE_SPATIAL_SCALABLE
+  bool loop = true;
+  while( loop )
+#else
   while( true )
+#endif
   {
     // send new YUV input buffer to first encoder stage
     if( inputPending )
     {
+#if ENABLE_SPATIAL_SCALABLE
+      picShared = xGetFreePicShared( m_layerId );
+#else
       picShared = xGetFreePicShared();
+#endif
       if( picShared )
       {
+#if ENABLE_SPATIAL_SCALABLE
+        picShared->reuse( m_picsRcvd, yuvInBuf, m_layerId );
+#else
         picShared->reuse( m_picsRcvd, yuvInBuf );
+#endif
         if( picShared->getPOC() >= 0 ) // skip lead frames
         {
           m_gopCfg->getNextGopEntry( picShared->m_gopEntry );
@@ -445,6 +519,13 @@ void EncLib::encodePicture( bool flush, const vvencYUVBuffer* yuvInBuf, AccessUn
     {
       encStage->runStage( flush, au );
       isQueueEmpty &= encStage->isStageDone();
+#if ENABLE_SPATIAL_SCALABLE
+      // If flashing, do not proceed to the next EncStage until the current EncStage is complete.
+      if (flush && !encStage->isStageDone()) {
+        loop = false;
+        break;
+      }
+#endif
     }
 
     if( !au.empty() )
@@ -493,7 +574,11 @@ void EncLib::printSummary()
 {
   if( m_gopEncoder )
   {
+#if ENABLE_SPATIAL_SCALABLE
+    m_gopEncoder->printOutSummary( m_encCfg.m_printMSEBasedSequencePSNR, m_encCfg.m_printSequenceMSE, m_encCfg.m_printHexPsnr, m_layerId );
+#else
     m_gopEncoder->printOutSummary( m_encCfg.m_printMSEBasedSequencePSNR, m_encCfg.m_printSequenceMSE, m_encCfg.m_printHexPsnr );
+#endif
   }
 }
 
@@ -514,12 +599,20 @@ int EncLib::getCurPass() const
 // Protected member functions
 // ====================================================================================================================
 
+#if ENABLE_SPATIAL_SCALABLE
+PicShared* EncLib::xGetFreePicShared( int layerId )
+#else
 PicShared* EncLib::xGetFreePicShared()
+#endif
 {
   PicShared* picShared = nullptr;
   for( auto itr : m_picSharedList )
   {
+#if ENABLE_SPATIAL_SCALABLE
+    if( ! itr->isUsed() && itr->getLayerId() == layerId )
+#else
     if( ! itr->isUsed() )
+#endif
     {
       picShared = itr;
       break;

@@ -109,9 +109,14 @@ void EncPicture::compressPicture( Picture& pic, EncGOP& gopEncoder )
     m_ALF.setAlfWSSD( 0 );
   }
 
+#if ENABLE_SPATIAL_SCALABLE
+  if (m_pcEncCfg->m_alf) {
+    m_ALF.setApsIdStart(pic.picApsMap.getApsIdStart());
+  }
+#endif
+
   // compress picture
   xInitPicEncoder( pic );
-
   // compress current slice
   pic.cs->slice = pic.slices[0];
   m_SliceEncoder.compressSlice( &pic );
@@ -263,7 +268,11 @@ void EncPicture::xInitPicEncoder( Picture& pic )
 
   m_SliceEncoder.initPic( &pic );
 
+#if ENABLE_SPATIAL_SCALABLE
+  // nothig to do
+#else
   xInitSliceColFromL0Flag( slice );
+#endif
   xInitSliceCheckLDC     ( slice );
 
   if( slice->sps->alfEnabled )

@@ -45,6 +45,15 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
+// ====================================================================================================================
+// Spatial scalable function
+// ====================================================================================================================
+#ifndef ENABLE_SPATIAL_SCALABLE
+#define ENABLE_SPATIAL_SCALABLE                           1
+#endif
+#define DPB_MAX_DEC_PIC_BUFFERING_BUG_FIX            1
+
+
 #include "vvenc/vvencDecl.h"
 
 #include <stdio.h>
@@ -85,6 +94,10 @@ typedef void (*vvencLoggingCallback)(void*, int, const char*, va_list);
 #define VVENC_MAX_QP_VALS_CHROMA              8      // max number qp vals in array
 #define VVENC_MAX_MCTF_FRAMES                 16
 #define VVENC_MAX_STRING_LEN                  1024   // max length of string/filename
+#if ENABLE_SPATIAL_SCALABLE
+#define VVENC_MAX_VPS_LAYERS                  64     // max vps layser
+#define VVENC_MAX_NUM_OLSS                    256    // max olss
+#endif
 
 // ====================================================================================================================
 
@@ -420,6 +433,9 @@ typedef struct vvenc_config
   int                 m_inputBitDepth[ 2 ];                                              // bit-depth of input pictures (2d array for luma,chroma)
 
   int                 m_numThreads;                                                      // number of worker threads ( if <0: <720p 4threads, else 8threads (limited to available cores))
+#if ENABLE_SPATIAL_SCALABLE
+  bool                m_multiLayerEnabledFlag;
+#endif
 
   int                 m_QP;                                                              // QP value of key-picture (0-63, default: 32)
   int                 m_RCTargetBitrate;                                                 // target bitrate in bps, (default. 0 (rc disabled))
@@ -715,6 +731,34 @@ typedef struct vvenc_config
   uint32_t            m_numExpTileCols;                                                  // number of explicitly specified tile columns
   uint32_t            m_numExpTileRows;                                                  // number of explicitly specified tile rows
   uint32_t            m_numSlicesInPic;                                                  // derived number of rectangular slices in the picture (raster-scan slice specified at slice level)
+
+#if ENABLE_SPATIAL_SCALABLE
+  int                 m_maxLayers;
+  //int                 m_targetOlsIdx;                                                    // NOTE : not supported.
+  //bool                m_OPIEnabled;                                                      // NOTE : not supported. --- enable Operating Point Information (OPI)
+  //int                 m_maxTemporalLayer;                                                // NOTE : not supported.
+  int                 m_layerId[VVENC_MAX_VPS_LAYERS];
+  //int                 m_layerIdx;                                                        // NOTE : not used.
+  int                 m_maxSublayers;
+  bool                m_defaultPtlDpbHrdMaxTidFlag;
+  bool                m_allIndependentLayersFlag;
+  char                m_predDirectionArray[VVENC_MAX_STRING_LEN];
+
+  int                 m_numRefLayers[VVENC_MAX_VPS_LAYERS];
+  char                m_refLayerIdxStr[VVENC_MAX_VPS_LAYERS][VVENC_MAX_STRING_LEN];
+  bool                m_eachLayerIsAnOlsFlag;
+  int                 m_olsModeIdc;
+  int                 m_numOutputLayerSets;
+  char                m_olsOutputLayerStr[VVENC_MAX_VPS_LAYERS][VVENC_MAX_STRING_LEN];
+  bool                m_avoidIntraInDepLayer;
+  char                m_maxTidILRefPicsPlus1Str[VVENC_MAX_VPS_LAYERS][VVENC_MAX_STRING_LEN];
+
+  int                 m_numPtlsInVps;
+
+  //vvencVPSParameters  m_VPSParameters;  // NOTE : This VTM implementation is unused.
+  vvencLevel          m_levelPtl[VVENC_MAX_NUM_OLSS];
+  int                 m_olsPtlIdx[VVENC_MAX_NUM_OLSS];
+#endif
 
   // decode bitstream options
   int                 m_switchPOC;                                                       // dbg poc.
